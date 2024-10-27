@@ -15,7 +15,7 @@ local function call_claude_api(prompt)
     local model = M.config.model
     local max_tokens = M.config.max_tokens
 
-    local url = "https://api.claude.ai/v1/messages"
+    local url = "https://api.anthropic.com/v1/messages"
     local body = vim.fn.json_encode({
         model = model,
         prompt = prompt,

@@ -17,15 +17,16 @@ local function call_claude_api(prompt)
     
     local url = "https://api.anthropic.com/v1/messages"
     
+    -- payload for Anthropic API
     local body = vim.fn.json_encode({
         model = model,
         messages = {
             { role = "user", content = prompt }
         },
-        max_tokens = max_tokens 
+        max_tokens = max_tokens
     })
     
-    -- Make an asynchronous HTTP POST request with updated headers
+    -- Make an asynchronous HTTP POST request
     vim.fn.jobstart({
         "curl", "-s", "-X", "POST", url,
         "-H", string.format("x-api-key: %s", api_key),
@@ -48,7 +49,8 @@ local function call_claude_api(prompt)
             end
         end,
         on_stderr = function(_, err)
-            if err then
+            -- Only print error if it's non-empty and contains actual error message
+            if err and #err > 0 and table.concat(err, "") ~= "" then
                 print("Error calling Claude API: " .. vim.inspect(err))
             end
         end,

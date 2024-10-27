@@ -10,7 +10,6 @@ function M.setup(opts)
     M.config.max_tokens = opts.max_tokens
 end
 
--- Send a request to Claude's API
 local function call_claude_api(prompt)
     local api_key = M.config.api_key_name
     local model = M.config.model
@@ -45,7 +44,8 @@ local function call_claude_api(prompt)
         end,
         on_stderr = function(_, err)
             if err then
-                print("Error calling Claude API: " .. err)
+                -- Convert the table to a string using vim.inspect for better readability
+                print("Error calling Claude API: " .. vim.inspect(err))
             end
         end,
     })

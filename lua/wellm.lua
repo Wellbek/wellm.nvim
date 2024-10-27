@@ -16,18 +16,17 @@ local function call_claude_api(prompt)
     local max_tokens = M.config.max_tokens
 
     local url = "https://api.anthropic.com/v1/messages"
+
+    -- Updated payload format for Anthropic API
     local body = vim.fn.json_encode({
         model = model,
-        prompt = prompt,
-        max_tokens = max_tokens
+        messages = {
+            { role = "user", content = prompt }  -- Anthropic expects messages array
+        },
+        max_tokens_to_sample = max_tokens 
     })
 
     -- Make an asynchronous HTTP POST request
-    local headers = {
-        ["Authorization"] = "Bearer " .. api_key,
-        ["Content-Type"] = "application/json"
-    }
-
     vim.fn.jobstart({
         "curl", "-s", "-X", "POST", url,
         "-H", "Authorization: Bearer " .. api_key,
@@ -37,14 +36,12 @@ local function call_claude_api(prompt)
         stdout_buffered = true,
         on_stdout = function(_, data)
             if data then
-                -- Join response lines and print to Neovim command line
                 local response = table.concat(data, "\n")
-                print(response)
+                print("Claude API Response: " .. response)
             end
         end,
         on_stderr = function(_, err)
             if err then
-                -- Convert the table to a string using vim.inspect for better readability
                 print("Error calling Claude API: " .. vim.inspect(err))
             end
         end,

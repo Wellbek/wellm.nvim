@@ -54,11 +54,11 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim), add this to your Neovim c
 ## Usage
 
 ### Default Keybindings (Visual Mode)
-- `<space>i`: Insert AI-generated code after selection
+- `<space>i`: Insert AI-generated code after mouse cursor
 - `<space>r`: Replace selection with AI-generated code
 
 ### Commands
-- `:Claude`: Insert AI-generated code after selection
+- `:Claude`: Insert AI-generated code after mouse cursor
 - `:ClaudeReplace`: Replace selection with AI-generated code
 
 ## Example Usage
@@ -69,6 +69,6 @@ Using [lazy.nvim](https://github.com/folke/lazy.nvim), add this to your Neovim c
    - Selected code will be replaced with improved version
 
 2. **Insert new code**:
-   - Select code/comments in visual mode (v)
+   - Write prompt as comment 
    - Press `<space>i` or type `:Claude`
-   - New code will be inserted on a new line after selection
+   - New code will be inserted on a new line after mouse cursor

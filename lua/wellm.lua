@@ -72,16 +72,22 @@ end
 local function replace_visual_selection(text)
     local start_pos = vim.fn.getpos("'<")
     local end_pos = vim.fn.getpos("'>")
-    local start_line = start_pos[2]
-    local end_line = end_pos[2]
-    
-    -- Replace the selected text with the new text
+    local start_line = start_pos[2] - 1
+    local end_line = end_pos[2] - 1
+    local start_col = start_pos[3] - 1
+    local end_col = end_pos[3] - 1
+
+    -- Get the length of the last line to ensure end_col doesn't exceed it
+    local line_length = vim.api.nvim_buf_get_lines(0, end_line, end_line + 1, true)[1]:len()
+    end_col = math.min(end_col, line_length)
+
+    -- Replace the text
     vim.api.nvim_buf_set_text(
         0,
-        start_line - 1,
-        start_pos[3] - 1,
-        end_line - 1,
-        end_pos[3],
+        start_line,
+        start_col,
+        end_line,
+        end_col,
         vim.split(text, "\n")
     )
 end

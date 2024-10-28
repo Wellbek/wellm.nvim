@@ -2,12 +2,39 @@
 local M = {}
 
 -- Configure setup with user-provided settings
-M.config = {}
+M.config = {
+    -- Default prompts that can be overridden in setup
+    prompts = {
+        replace = [[You are a code assistant. Follow these rules strictly:
+1. Output only valid, clean code
+2. Remove comments that contain instructions/requests after implementing them
+3. Preserve non-instruction comments
+4. Never use markdown code blocks or backticks
+5. Never add explanations or additional text
+6. Keep existing code structure unless specifically asked to change it]],
+        
+        insert = [[You are a code assistant. Follow these rules strictly:
+1. Output only valid, clean code
+2. Never use markdown code blocks or backticks
+3. Never add explanations or additional text
+4. Format the code to match the surrounding context]]
+    }
+}
 
 function M.setup(opts)
     M.config.api_key = opts.api_key_name
     M.config.model = opts.model
     M.config.max_tokens = opts.max_tokens
+    
+    -- Allow custom prompts to override defaults
+    if opts.prompts then
+        if opts.prompts.replace then
+            M.config.prompts.replace = opts.prompts.replace
+        end
+        if opts.prompts.insert then
+            M.config.prompts.insert = opts.prompts.insert
+        end
+    end
 end
 
 local function get_visual_selection()
@@ -38,13 +65,30 @@ local function insert_at_cursor(text)
     -- Get current line content
     local current_line = vim.api.nvim_get_current_line()
     
-    -- Split the line at cursor position
+    -- Split the text into lines
+    local text_lines = vim.split(text, "\n")
+    
+    -- Handle the first line: combine with current line content
     local before = string.sub(current_line, 1, col + 1)
     local after = string.sub(current_line, col + 2)
+    local first_line = before .. text_lines[1]
     
-    -- Insert text at cursor position
-    local new_line = before .. text .. after
-    vim.api.nvim_set_current_line(new_line)
+    -- If there's only one line, handle it differently
+    if #text_lines == 1 then
+        vim.api.nvim_set_current_line(first_line .. after)
+        return
+    end
+    
+    -- Prepare all lines for insertion
+    local lines_to_insert = {first_line}
+    for i = 2, #text_lines - 1 do
+        table.insert(lines_to_insert, text_lines[i])
+    end
+    -- Add the last line with the remaining content from the original line
+    table.insert(lines_to_insert, text_lines[#text_lines] .. after)
+    
+    -- Replace the current line and insert the new lines
+    vim.api.nvim_buf_set_lines(0, line, line + 1, false, lines_to_insert)
 end
 
 local function replace_visual_selection(text)
@@ -64,18 +108,21 @@ local function replace_visual_selection(text)
     )
 end
 
-local function call_claude_api(prompt, callback)
+local function call_claude_api(prompt, callback, system_prompt)
     local api_key = M.config.api_key
     local model = M.config.model
     local max_tokens = M.config.max_tokens
     
     local url = "https://api.anthropic.com/v1/messages"
     
+    -- Combine system prompt with user prompt
+    local full_prompt = system_prompt .. "\n\nHere is the code:\n" .. prompt
+    
     -- payload for Anthropic API
     local body = vim.fn.json_encode({
         model = model,
         messages = {
-            { role = "user", content = prompt }
+            { role = "user", content = full_prompt }
         },
         max_tokens = max_tokens
     })
@@ -95,7 +142,9 @@ local function call_claude_api(prompt, callback)
                 if response ~= "" then
                     local decoded = vim.fn.json_decode(response)
                     if decoded and decoded.content and decoded.content[1] and decoded.content[1].text then
-                        callback(decoded.content[1].text)
+                        -- Strip any potential markdown code blocks that might have been added
+                        local clean_text = decoded.content[1].text:gsub("```%w*\n?", ""):gsub("```", "")
+                        callback(clean_text)
                     else
                         print("Claude API Response: " .. response)
                     end
@@ -114,7 +163,7 @@ end
 function M.claude()
     local selected_text = get_visual_selection()
     if selected_text ~= "" then
-        call_claude_api(selected_text, insert_at_cursor)
+        call_claude_api(selected_text, insert_at_cursor, M.config.prompts.insert)
     end
 end
 
@@ -122,7 +171,7 @@ end
 function M.claude_replace()
     local selected_text = get_visual_selection()
     if selected_text ~= "" then
-        call_claude_api(selected_text, replace_visual_selection)
+        call_claude_api(selected_text, replace_visual_selection, M.config.prompts.replace)
     end
 end
 

@@ -64,7 +64,8 @@ M.config = {
 1. Output only valid, clean code
 2. Never use markdown code blocks or backticks
 3. Never add explanations or additional text
-4. Format the code to match the surrounding context]]
+4. Format the code to match the surrounding context
+5. Only add the new code that is to be inserted. Do not output what was already provided]]
     }
 }
 

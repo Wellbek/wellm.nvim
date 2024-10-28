@@ -57,38 +57,16 @@ local function get_visual_selection()
     return table.concat(lines, "\n")
 end
 
-local function insert_at_cursor(text)
-    local cursor_pos = vim.api.nvim_win_get_cursor(0)
-    local line = cursor_pos[1] - 1
-    local col = cursor_pos[2]
-    
-    -- Get current line content
-    local current_line = vim.api.nvim_get_current_line()
+local function insert_after_selection(text)
+    local end_pos = vim.fn.getpos("'>")
+    local end_line = end_pos[2]
     
     -- Split the text into lines
-    local text_lines = vim.split(text, "\n")
+    local lines_to_insert = vim.split(text, "\n")
     
-    -- Handle the first line: combine with current line content
-    local before = string.sub(current_line, 1, col + 1)
-    local after = string.sub(current_line, col + 2)
-    local first_line = before .. text_lines[1]
-    
-    -- If there's only one line, handle it differently
-    if #text_lines == 1 then
-        vim.api.nvim_set_current_line(first_line .. after)
-        return
-    end
-    
-    -- Prepare all lines for insertion
-    local lines_to_insert = {first_line}
-    for i = 2, #text_lines - 1 do
-        table.insert(lines_to_insert, text_lines[i])
-    end
-    -- Add the last line with the remaining content from the original line
-    table.insert(lines_to_insert, text_lines[#text_lines] .. after)
-    
-    -- Replace the current line and insert the new lines
-    vim.api.nvim_buf_set_lines(0, line, line + 1, false, lines_to_insert)
+    -- Insert a blank line and then the text after the selection
+    vim.api.nvim_buf_set_lines(0, end_line, end_line, false, {""})
+    vim.api.nvim_buf_set_lines(0, end_line + 1, end_line + 1, false, lines_to_insert)
 end
 
 local function replace_visual_selection(text)
@@ -163,7 +141,7 @@ end
 function M.claude()
     local selected_text = get_visual_selection()
     if selected_text ~= "" then
-        call_claude_api(selected_text, insert_at_cursor, M.config.prompts.insert)
+        call_claude_api(selected_text, insert_after_selection, M.config.prompts.insert)
     end
 end
 

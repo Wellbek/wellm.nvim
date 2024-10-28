@@ -114,7 +114,7 @@ local function call_claude_api(prompt, callback, system_prompt)
                 if response ~= "" then
                     local decoded = vim.fn.json_decode(response)
                     if decoded and decoded.content and decoded.content[1] and decoded.content[1].text then
-                        local clean_text = decoded.content[1].text:gsub("%w*\n?", ""):gsub("", "")
+                        local clean_text = decoded.content[1].text:gsub("```%w*\n?", ""):gsub("", "")
                         callback(clean_text)
                     else
                         print("Claude API Response: " .. response)
@@ -151,4 +151,3 @@ vim.api.nvim_create_user_command("ClaudeReplace", function()
 end, { range = true })
 
 return M
-

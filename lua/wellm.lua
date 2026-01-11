@@ -1,33 +1,376 @@
 local M = {}
 
-local function get_visual_selection()
-    local start_pos = vim.fn.getpos("'<")
-    local end_pos = vim.fn.getpos("'>")
-    local lines = vim.fn.getline(start_pos[2], end_pos[2])
+-- -------------------------------------------------------------------------------
+-- STATE MANAGEMENT
+-- -------------------------------------------------------------------------------
+M.state = {
+  history = {},          -- Conversation history
+  context_files = {},    -- Map of file path -> content
+  system_override = nil, -- Temporary system prompt override
+  chat_buffer = nil,     -- Buffer ID for the chat window
+  chat_win = nil,        -- Window ID for the chat window
+}
 
-    if #lines == 0 then
-        return ""
-    end
+-- -------------------------------------------------------------------------------
+-- DEFAULT CONFIGURATION
+-- -------------------------------------------------------------------------------
+M.defaults = {
+  -- Provider: "anthropic" (Claude) or "zhipu" (GLM)
+  provider = "anthropic", 
+  api_key_name = "ANTHROPIC_API_KEY", -- Name of the environment variable
+  api_key = nil, -- Or set the API key directly here
+  model = "claude-3-5-sonnet-20240620", -- Default model
+  max_tokens = 8192,
+  auto_open_chat = true, -- Open chat window automatically for non-replace actions
+  
+  -- Professional System Prompts
+  prompts = {
+    coding = [[You are an expert Senior Software Engineer and AI Assistant.
+Your purpose is to write clean, maintainable, and secure code.
 
-    -- Handle single line selection
-    if #lines == 1 then
-        return string.sub(lines[1], start_pos[3], end_pos[3])
-    end
+INSTRUCTIONS:
+1. Adhere strictly to the user's requested output format (code block, markdown, or raw text).
+2. If writing code, prioritize readability and existing project patterns.
+3. Always handle edge cases and errors implicitly or explicitly as appropriate.
+4. If asked to "Replace" or "Insert", output ONLY the code segment, no markdown wrappers, no explanations.
+5. If asked to "Explain" or "Chat", use Markdown formatting and be verbose.
+6. Analyze the provided Context Files to understand imports, types, and architectural patterns used in the project.]],
+    
+    chat = [[You are a helpful AI coding assistant integrated into Neovim.
+You have access to the user's codebase context.
+Answer concisely but provide code examples when helpful.]]
+  },
 
-    -- Handle multi-line selection
-    lines[1] = string.sub(lines[1], start_pos[3])
-    lines[#lines] = string.sub(lines[#lines], 1, end_pos[3])
-    return table.concat(lines, "\n")
+  -- Default Keymaps (can be disabled with skip_default_mappings = true)
+  keys = {
+    -- Actions
+    replace = { "<leader>cr", mode = "v", desc = "AI Replace Selection" },
+    insert = { "<leader>cc", mode = "n", desc = "AI Insert at Cursor" },
+    chat = { "<leader>ca", mode = "n", desc = "Open AI Chat" },
+    
+    -- Context Management
+    add_file = { "<leader>caf", mode = "n", desc = "AI: Add File to Context" },
+    add_folder = { "<leader>cad", mode = "n", desc = "AI: Add Folder to Context" },
+    clear_context = { "<leader>cac", mode = "n", desc = "AI: Clear Context" },
+  }
+}
+
+-- -------------------------------------------------------------------------------
+-- SETUP
+-- -------------------------------------------------------------------------------
+function M.setup(opts)
+  M.config = vim.tbl_deep_extend("force", M.defaults, opts or {})
+  
+  -- Resolve API Key
+  if not M.config.api_key then
+    M.config.api_key = os.getenv(M.config.api_key_name)
+  end
+
+  if not M.config.api_key then
+    vim.notify("[Wellm] API Key not found. Check config.", vim.log.levels.WARN)
+  end
+
+  -- Load Keymaps
+  if not M.config.skip_default_mappings then
+    M.set_keymaps()
+  end
+
+  -- Load Commands
+  M.set_commands()
 end
 
-local function insert_after_cursor(text)
-    local cursor_pos = vim.api.nvim_win_get_cursor(0)
-    local cursor_line = cursor_pos[1]
-    local lines_to_insert = vim.split(text, "\n")
-    vim.api.nvim_buf_set_lines(0, cursor_line, cursor_line, false, lines_to_insert)
+function M.set_keymaps()
+  local k = vim.keymap.set
+  local opts = { noremap = true, silent = true }
+
+  -- Core Actions
+  k("v", M.config.keys.replace[1], function() M.action_replace() end, vim.tbl_extend("force", opts, { desc = M.config.keys.replace[3] }))
+  k("n", M.config.keys.insert[1], function() M.action_insert() end, vim.tbl_extend("force", opts, { desc = M.config.keys.insert[3] }))
+  k("n", M.config.keys.chat[1], function() M.open_chat() end, vim.tbl_extend("force", opts, { desc = M.config.keys.chat[3] }))
+
+  -- Context
+  k("n", M.config.keys.add_file[1], function() M.add_context_file() end, vim.tbl_extend("force", opts, { desc = M.config.keys.add_file[3] }))
+  k("n", M.config.keys.add_folder[1], function() M.add_context_folder() end, vim.tbl_extend("force", opts, { desc = M.config.keys.add_folder[3] }))
+  k("n", M.config.keys.clear_context[1], function() M.clear_context() end, vim.tbl_extend("force", opts, { desc = M.config.keys.clear_context[3] }))
 end
 
-local function replace_visual_selection(text)
+function M.set_commands()
+  vim.api.nvim_create_user_command("WellmReplace", function() M.action_replace() end, { range = true })
+  vim.api.nvim_create_user_command("WellmInsert", function() M.action_insert() end, {})
+  vim.api.nvim_create_user_command("WellmChat", function() M.open_chat() end, {})
+  vim.api.nvim_create_user_command("WellmAddFile", function() M.add_context_file() end, {})
+  vim.api.nvim_create_user_command("WellmAddFolder", function() M.add_context_folder() end, {})
+  vim.api.nvim_create_user_command("WellmSystem", function() M.edit_system_prompt() end, {})
+end
+
+-- -------------------------------------------------------------------------------
+-- CONTEXT MANAGEMENT
+-- -------------------------------------------------------------------------------
+function M.add_context_file(path)
+  path = path or vim.fn.expand("%:p")
+  if not path or path == "" then return end
+  
+  local content = table.concat(vim.fn.readfile(path), "\n")
+  M.state.context_files[path] = content
+  vim.notify(string.format("[Wellm] Added context: %s (%d lines)", path, #vim.fn.readfile(path)))
+end
+
+function M.add_context_folder(path)
+  path = path or vim.fn.input("Folder path: ", vim.fn.expand("%:p:h"), "dir")
+  local handle = vim.loop.fs_scandir(path)
+  
+  if not handle then return end
+  
+  local count = 0
+  while true do
+    local name, type = vim.loop.fs_scandir_next(handle)
+    if not name then break end
+    
+    local full_path = path .. "/" .. name
+    -- Filter simple text/code files (heuristic)
+    if type == "file" and not name:match("%.git") and not name:match("%.lock") then
+      M.add_context_file(full_path)
+      count = count + 1
+    end
+  end
+  vim.notify(string.format("[Wellm] Added %d files from folder to context.", count))
+end
+
+function M.clear_context()
+  M.state.context_files = {}
+  M.state.history = {}
+  vim.notify("[Wellm] Context and History cleared.")
+end
+
+function M.edit_system_prompt()
+  local current = M.state.system_override or M.config.prompts.coding
+  vim.ui.input({ prompt = "System Prompt: ", default = current }, function(input)
+    if input then
+      M.state.system_override = input
+      vim.notify("[Wellm] System prompt updated.")
+    end
+  end)
+end
+
+-- -------------------------------------------------------------------------------
+-- UI & CHAT
+-- -------------------------------------------------------------------------------
+function M.open_chat()
+  if M.state.chat_win and vim.api.nvim_win_is_valid(M.state.chat_win) then
+    -- Focus existing window
+    vim.api.nvim_set_current_win(M.state.chat_win)
+    return
+  end
+
+  -- Create buffer
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(buf, "Wellm Chat")
+  vim.api.nvim_buf_set_option(buf, "filetype", "markdown")
+  
+  -- Create window (right side split)
+  local width = math.floor(vim.o.columns * 0.4)
+  local win = vim.api.nvim_open_win(buf, true, {
+    split = "right",
+    width = width,
+    style = "minimal"
+  })
+  
+  M.state.chat_buffer = buf
+  M.state.chat_win = win
+
+  -- Keymaps for chat buffer
+  vim.keymap.set("n", "q", function() vim.api.nvim_win_close(M.state.chat_win, true) end, { buffer = buf, silent = true })
+  vim.keymap.set("n", "<CR>", function() M.submit_chat_input() end, { buffer = buf, silent = true })
+  
+  -- Render existing history
+  M.render_chat_history()
+end
+
+function M.render_chat_history()
+  if not M.state.chat_buffer then return end
+  local lines = {}
+  for _, msg in ipairs(M.state.history) do
+    table.insert(lines, string.format("## %s", msg.role:upper()))
+    table.insert(lines, msg.content)
+    table.insert(lines, "---")
+  end
+  vim.api.nvim_buf_set_lines(M.state.chat_buffer, 0, -1, false, lines)
+  -- Move cursor to end
+  vim.api.nvim_win_set_cursor(M.state.chat_win, { #lines, 0 })
+end
+
+function M.submit_chat_input()
+  -- Last line is the input
+  local lines = vim.api.nvim_buf_get_lines(M.state.chat_buffer, -2, -1, false)
+  local input = lines[1] or ""
+  
+  -- Remove input line
+  vim.api.nvim_buf_set_lines(M.state.chat_buffer, -2, -1, false, {})
+  
+  if #input > 0 then
+    M.call_llm(input, "chat", function(response)
+      -- Add to history and render
+      table.insert(M.state.history, { role = "user", content = input })
+      table.insert(M.state.history, { role = "assistant", content = response })
+      M.render_chat_history()
+    end)
+  end
+end
+
+-- -------------------------------------------------------------------------------
+-- CORE LOGIC
+-- -------------------------------------------------------------------------------
+
+function M.get_visual_selection()
+  local start_pos = vim.fn.getpos("'<")
+  local end_pos = vim.fn.getpos("'>")
+  local lines = vim.fn.getline(start_pos[2], end_pos[2])
+  if #lines == 0 then return "" end
+  if #lines == 1 then return string.sub(lines[1], start_pos[3], end_pos[3]) end
+  lines[1] = string.sub(lines[1], start_pos[3])
+  lines[#lines] = string.sub(lines[#lines], 1, end_pos[3])
+  return table.concat(lines, "\n")
+end
+
+function M.build_payload(user_content, mode)
+  -- Construct the user prompt with Context
+  local formatted_context = ""
+  if next(M.state.context_files) ~= nil then
+    formatted_context = "\n\n### REFERENCE CONTEXT FILES:\n"
+    for path, content in pairs(M.state.context_files) do
+      formatted_context = formatted_context .. string.format("File: %s\n%s\n", path, content)
+    end
+  end
+
+  local active_code = ""
+  if mode == "replace" then
+    active_code = "\n\n### ACTIVE SELECTION TO MODIFY:\n" .. user_content
+  elseif mode == "insert" then
+    active_code = "\n\n### ACTIVE FILE CONTEXT (Insert at cursor):\n" .. user_content
+  end
+  
+  local final_user_msg = user_content .. active_code .. formatted_context
+  
+  -- Build messages array
+  local messages = {}
+  
+  -- Previous history
+  for _, msg in ipairs(M.state.history) do
+    table.insert(messages, { role = msg.role, content = msg.content })
+  end
+  
+  -- Current request
+  table.insert(messages, { role = "user", content = final_user_msg })
+
+  local system_prompt = M.state.system_override or M.config.prompts.coding
+  if mode == "chat" then system_prompt = M.config.prompts.chat end
+
+  return messages, system_prompt
+end
+
+-- Generic LLM Caller
+function M.call_llm(input_text, mode, callback)
+  local messages, system_prompt = M.build_payload(input_text, mode)
+  local api_key = M.config.api_key
+  local model = M.config.model
+  local provider = M.config.provider
+
+  if not api_key then
+    vim.notify("Missing API Key", vim.log.levels.ERROR)
+    return
+  end
+
+  local url, headers, body
+
+  -- Handle different Providers
+  if provider == "anthropic" then
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+      "-H", string.format("x-api-key: %s", api_key),
+      "-H", "anthropic-version: 2023-06-01",
+      "-H", "content-type: application/json",
+    }
+    body = vim.fn.json_encode({
+      model = model,
+      system = system_prompt,
+      messages = messages,
+      max_tokens = M.config.max_tokens
+    })
+  elseif provider == "zhipu" then
+    -- GLM-4 OpenAI Compatible Endpoint
+    url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    -- Prepend system prompt to messages for OpenAI-compatible format
+    table.insert(messages, 1, { role = "system", content = system_prompt })
+    
+    headers = {
+      "-H", string.format("Authorization: Bearer %s", api_key),
+      "-H", "content-type: application/json",
+    }
+    body = vim.fn.json_encode({
+      model = model, -- e.g., "glm-4"
+      messages = messages,
+      max_tokens = M.config.max_tokens
+    })
+  else
+    vim.notify("Unknown provider: " .. provider, vim.log.levels.ERROR)
+    return
+  end
+
+  -- Execute Request
+  if M.config.auto_open_chat and mode == "chat" then M.open_chat() end
+
+  vim.fn.jobstart({ "curl", "-s", "-X", "POST", url, unpack(headers), "-d", body }, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if not data then return end
+      local response = table.concat(data, "\n")
+      if response == "" then return end
+      
+      local ok, decoded = pcall(vim.fn.json_decode, response)
+      if ok then
+        local content = ""
+        
+        if provider == "anthropic" then
+          if decoded.content and decoded.content[1] then
+            content = decoded.content[1].text
+          end
+        elseif provider == "zhipu" then
+          if decoded.choices and decoded.choices[1] then
+            content = decoded.choices[1].message.content
+          end
+        end
+
+        if content and content ~= "" then
+          -- Clean markdown code blocks for Replace mode
+          if mode == "replace" or mode == "insert" then
+            content = content:gsub("```%w*\n?", ""):gsub("", "")
+          end
+          callback(content)
+        else
+          vim.notify("Empty response from LLM", vim.log.levels.WARN)
+        end
+      else
+        vim.notify("API Error: " .. response, vim.log.levels.ERROR)
+      end
+    end,
+    on_stderr = function(_, err)
+      if err and #err > 0 then vim.notify("LLM Error: " .. table.concat(err, ""), vim.log.levels.ERROR) end
+    end
+  })
+end
+
+-- -------------------------------------------------------------------------------
+-- ACTIONS
+-- -------------------------------------------------------------------------------
+
+function M.action_replace()
+  local selection = M.get_visual_selection()
+  if selection == "" then return end
+  
+  vim.notify("[Wellm] Requesting replacement...", vim.log.levels.INFO)
+  
+  M.call_llm(selection, "replace", function(response)
+    -- Restore visual range to replace it
     local start_pos = vim.fn.getpos("'<")
     local end_pos = vim.fn.getpos("'>")
     local start_line = start_pos[2] - 1
@@ -35,120 +378,27 @@ local function replace_visual_selection(text)
     local start_col = start_pos[3] - 1
     local end_col = end_pos[3] - 1
 
-    -- Get the length of the last line to ensure end_col doesn't exceed it
-    local line_length = vim.api.nvim_buf_get_lines(0, end_line, end_line + 1, true)[1]:len()
-    end_col = math.min(end_col, line_length)
-
-    -- Replace the text
-    vim.api.nvim_buf_set_text(
-        0,
-        start_line,
-        start_col,
-        end_line,
-        end_col,
-        vim.split(text, "\n")
-    )
+    local lines = vim.split(response, "\n")
+    vim.api.nvim_buf_set_text(0, start_line, start_col, end_line, end_col, lines)
+    vim.notify("[Wellm] Replaced code.", vim.log.levels.INFO)
+  end)
 end
 
-M.config = {
-    prompts = {
-        replace = [[You are a code assistant. Follow these rules strictly:
-1. Output only valid, clean code
-2. Remove comments that contain instructions/requests after implementing them
-3. Preserve non-instruction comments
-4. Never use markdown code blocks or backticks
-5. Never add explanations or additional text
-6. Keep existing code structure unless specifically asked to change it]],
-
-        insert = [[You are a code assistant. Follow these rules strictly:
-1. Output only valid, clean code
-2. Never use markdown code blocks or backticks
-3. Never add explanations or additional text
-4. Format the code to match the surrounding context
-5. Only add the new code that is to be inserted. Do not output what was already provided]]
-    }
-}
-
-function M.setup(opts)
-    M.config.api_key = opts.api_key_name
-    M.config.model = opts.model
-    M.config.max_tokens = opts.max_tokens
-
-    if opts.prompts then
-        if opts.prompts.replace then
-            M.config.prompts.replace = opts.prompts.replace
-        end
-        if opts.prompts.insert then
-            M.config.prompts.insert = opts.prompts.insert
-        end
-    end
+function M.action_insert()
+  local file_content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  -- For insert, we usually ask the user "What do you want to insert?"
+  -- But to keep it fast, let's assume the prompt is "Generate code fitting for this context"
+  -- We'll use the prompts.insert logic but simplified
+  vim.ui.input({ prompt = "Describe code to insert: " }, function(input)
+    if not input or input == "" then return end
+    
+    M.call_llm(input, "insert", function(response)
+      local cursor_pos = vim.api.nvim_win_get_cursor(0)
+      local cursor_line = cursor_pos[1]
+      local lines = vim.split(response, "\n")
+      vim.api.nvim_buf_set_lines(0, cursor_line, cursor_line, false, lines)
+    end)
+  end)
 end
-
-local function call_claude_api(prompt, callback, system_prompt)
-    local api_key = M.config.api_key
-    local model = M.config.model
-    local max_tokens = M.config.max_tokens
-
-    local url = "https://api.anthropic.com/v1/messages"
-
-    local full_prompt = system_prompt .. "\n\nHere is the code:\n" .. prompt
-
-    local body = vim.fn.json_encode({
-        model = model,
-        messages = {
-            { role = "user", content = full_prompt }
-        },
-        max_tokens = max_tokens
-    })
-
-    vim.fn.jobstart({
-        "curl", "-s", "-X", "POST", url,
-        "-H", string.format("x-api-key: %s", api_key),
-        "-H", "anthropic-version: 2023-06-01",
-        "-H", "Content-Type: application/json",
-        "-d", body
-    }, {
-        stdout_buffered = true,
-        on_stdout = function(_, data)
-            if data then
-                local response = table.concat(data, "\n")
-                if response ~= "" then
-                    local decoded = vim.fn.json_decode(response)
-                    if decoded and decoded.content and decoded.content[1] and decoded.content[1].text then
-                        local clean_text = decoded.content[1].text:gsub("```%w*\n?", ""):gsub("", "")
-                        callback(clean_text)
-                    else
-                        print("Claude API Response: " .. response)
-                    end
-                end
-            end
-        end,
-        on_stderr = function(_, err)
-            if err and #err > 0 and table.concat(err, "") ~= "" then
-                print("Error calling Claude API: " .. vim.inspect(err))
-            end
-        end,
-    })
-end
-
-function M.claude()
-    local entire_file = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
-    call_claude_api(entire_file, insert_after_cursor, M.config.prompts.insert)
-end
-
-function M.claude_replace()
-    local selected_text = get_visual_selection()
-    if selected_text ~= "" then
-        call_claude_api(selected_text, replace_visual_selection, M.config.prompts.replace)
-    end
-end
-
-vim.api.nvim_create_user_command("Claude", function()
-    M.claude()
-end, { range = true })
-
-vim.api.nvim_create_user_command("ClaudeReplace", function()
-    M.claude_replace()
-end, { range = true })
 
 return M

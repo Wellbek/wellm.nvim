@@ -332,15 +332,25 @@ function M.call_llm(input_text, mode, callback, file_context)
   -- Execute Request
   if M.config.auto_open_chat and mode == "chat" then M.open_chat() end
 
-  vim.fn.jobstart({ "curl", "-s", "-X", "POST", url, unpack(headers), "-d", body }, {
-    stdout_buffered = true,
-    -- ... inside M.call_llm, update the on_stdout function ...
+  local curl_args = { "curl", "-s", "-X", "POST", url }
+  for _, h in ipairs(headers) do
+    table.insert(curl_args, h)
+  end
+  table.insert(curl_args, "-d")
+  table.insert(curl_args, body)
 
+  print("[Wellm Debug] URL: " .. url)
+  print("[Wellm Debug] Args: " .. vim.inspect(curl_args))
+
+  vim.fn.jobstart(curl_args, {
+    stdout_buffered = true,
     on_stdout = function(_, data)
-      if not data then return end
+      if not data or (math.type(data) == "integer") then return end
       local response = table.concat(data, "\n")
-      if response == "" then return end
-      
+    
+      -- DEBUG PRINT: See the raw API response
+      print("[Wellm Debug] Raw Response: " .. response)
+        
       local ok, decoded = pcall(vim.fn.json_decode, response)
       
       if ok then

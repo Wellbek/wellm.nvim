@@ -19,7 +19,7 @@ M.defaults = {
   provider = "anthropic", 
   api_key_name = "ANTHROPIC_API_KEY", -- Name of the environment variable
   api_key = nil, -- Or set the API key directly here
-  model = "claude-3-5-sonnet-20240620", -- Default model
+  model = "claude-sonnet-4-5", -- Default model
   max_tokens = 8192,
   auto_open_chat = true, -- Open chat window automatically for non-replace actions
   

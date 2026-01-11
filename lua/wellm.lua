@@ -345,7 +345,7 @@ function M.call_llm(input_text, mode, callback, file_context)
   vim.fn.jobstart(curl_args, {
     stdout_buffered = true,
     on_stdout = function(_, data)
-      if not data or (math.type(data) == "integer") then return end
+      if not data or type(data) == "number" then return end
       local response = table.concat(data, "\n")
     
       -- DEBUG PRINT: See the raw API response

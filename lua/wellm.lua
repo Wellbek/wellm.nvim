@@ -59,11 +59,17 @@ Answer concisely but provide code examples when helpful.]]
 -- SETUP
 -- -------------------------------------------------------------------------------
 function M.setup(opts)
+  -- Merge options
   M.config = vim.tbl_deep_extend("force", M.defaults, opts or {})
   
+  -- DEBUG: Print the resolved API Key (Masked for security)
+  local key_preview = M.config.api_key and string.sub(M.config.api_key, 1, 5) .. "..." or "nil"
+  print("[Wellm Debug] Setup started. API Key received: " .. key_preview)
+  
   -- Resolve API Key
-  if not M.config.api_key then
+  if not M.config.api_key or M.config.api_key == "" then
     M.config.api_key = os.getenv(M.config.api_key_name)
+    print("[Wellm Debug] No config key found. Checked env var. Result: " .. tostring(M.config.api_key ~= nil))
   end
 
   if not M.config.api_key then

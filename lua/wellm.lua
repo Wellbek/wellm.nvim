@@ -328,37 +328,64 @@ function M.call_llm(input_text, mode, callback, file_context)
 
   vim.fn.jobstart({ "curl", "-s", "-X", "POST", url, unpack(headers), "-d", body }, {
     stdout_buffered = true,
+    -- ... inside M.call_llm, update the on_stdout function ...
+
     on_stdout = function(_, data)
       if not data then return end
       local response = table.concat(data, "\n")
       if response == "" then return end
       
       local ok, decoded = pcall(vim.fn.json_decode, response)
+      
       if ok then
+        -- 1. Check if Anthropic returned an explicit Error Object
+        if decoded.type == "error" then
+          local msg = decoded.error and decoded.error.message or "Unknown API Error"
+          vim.notify("LLM API Error: " .. msg, vim.log.levels.ERROR)
+          return
+        end
+
         local content = ""
         
         if provider == "anthropic" then
-          if decoded.content and decoded.content[1] then content = decoded.content[1].text end
+          -- Handle normal text response
+          if decoded.content and decoded.content[1] then
+            content = decoded.content[1].text
+          else
+            -- Debug: If we got here, JSON is valid, but content structure is wrong.
+            -- Print the raw response to :messages
+            print("DEBUG: Anthropic returned valid JSON but unexpected structure:")
+            print(vim.inspect(decoded))
+            vim.notify("LLM Error: Could not find text in response. Check :messages for debug info.", vim.log.levels.ERROR)
+            return
+          end
+          
         elseif provider == "zhipu" then
-          if decoded.choices and decoded.choices[1] then content = decoded.choices[1].message.content end
+          if decoded.choices and decoded.choices[1] then
+            content = decoded.choices[1].message.content
+          else
+            print("DEBUG: Zhipu returned valid JSON but unexpected structure:")
+            print(vim.inspect(decoded))
+            vim.notify("LLM Error: Could not find text in response. Check :messages for debug info.", vim.log.levels.ERROR)
+            return
+          end
         end
 
         if content and content ~= "" then
-          -- Clean markdown code blocks for Replace mode
+          -- Clean markdown code blocks for Replace/Insert modes
           if mode == "replace" or mode == "insert" then
             content = content:gsub("```%w*\n?", ""):gsub("", "")
           end
           callback(content)
         else
-          vim.notify("Empty response from LLM", vim.log.levels.WARN)
+          vim.notify("LLM Error: Content was empty.", vim.log.levels.WARN)
         end
+        
       else
-        vim.notify("API Error: " .. response, vim.log.levels.ERROR)
+        -- If JSON decode failed
+        vim.notify("LLM API Error: " .. response, vim.log.levels.ERROR)
       end
     end,
-    on_stderr = function(_, err)
-      if err and #err > 0 then vim.notify("LLM Error: " .. table.concat(err, ""), vim.log.levels.ERROR) end
-    end
   })
 end
 

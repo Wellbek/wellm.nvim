@@ -77,6 +77,8 @@ function M.setup(opts)
 
   -- Load Commands
   M.set_commands()
+  
+  vim.notify("[Wellm] Plugin loaded successfully.", vim.log.levels.INFO)
 end
 
 function M.set_keymaps()
@@ -95,12 +97,15 @@ function M.set_keymaps()
 end
 
 function M.set_commands()
-  vim.api.nvim_create_user_command("WellmReplace", function() M.action_replace() end, { range = true })
-  vim.api.nvim_create_user_command("WellmInsert", function() M.action_insert() end, {})
-  vim.api.nvim_create_user_command("WellmChat", function() M.open_chat() end, {})
-  vim.api.nvim_create_user_command("WellmAddFile", function() M.add_context_file() end, {})
-  vim.api.nvim_create_user_command("WellmAddFolder", function() M.add_context_folder() end, {})
-  vim.api.nvim_create_user_command("WellmSystem", function() M.edit_system_prompt() end, {})
+  -- Check if commands exist to avoid duplicates if reloaded manually
+  if not vim.api.nvim_get_commands({})["WellmReplace"] then
+    vim.api.nvim_create_user_command("WellmReplace", function() M.action_replace() end, { range = true })
+    vim.api.nvim_create_user_command("WellmInsert", function() M.action_insert() end, {})
+    vim.api.nvim_create_user_command("WellmChat", function() M.open_chat() end, {})
+    vim.api.nvim_create_user_command("WellmAddFile", function() M.add_context_file() end, {})
+    vim.api.nvim_create_user_command("WellmAddFolder", function() M.add_context_folder() end, {})
+    vim.api.nvim_create_user_command("WellmSystem", function() M.edit_system_prompt() end, {})
+  end
 end
 
 -- -------------------------------------------------------------------------------
@@ -232,7 +237,7 @@ function M.get_visual_selection()
   return table.concat(lines, "\n")
 end
 
-function M.build_payload(user_content, mode)
+function M.build_payload(user_content, mode, extra_file_context)
   -- Construct the user prompt with Context
   local formatted_context = ""
   if next(M.state.context_files) ~= nil then
@@ -246,7 +251,10 @@ function M.build_payload(user_content, mode)
   if mode == "replace" then
     active_code = "\n\n### ACTIVE SELECTION TO MODIFY:\n" .. user_content
   elseif mode == "insert" then
-    active_code = "\n\n### ACTIVE FILE CONTEXT (Insert at cursor):\n" .. user_content
+    active_code = "\n\n### INSTRUCTION:\n" .. user_content
+    if extra_file_context then
+      active_code = active_code .. "\n\n### CURRENT FILE CONTEXT:\n" .. extra_file_context
+    end
   end
   
   local final_user_msg = user_content .. active_code .. formatted_context
@@ -268,9 +276,8 @@ function M.build_payload(user_content, mode)
   return messages, system_prompt
 end
 
--- Generic LLM Caller
-function M.call_llm(input_text, mode, callback)
-  local messages, system_prompt = M.build_payload(input_text, mode)
+function M.call_llm(input_text, mode, callback, file_context)
+  local messages, system_prompt = M.build_payload(input_text, mode, file_context)
   local api_key = M.config.api_key
   local model = M.config.model
   local provider = M.config.provider
@@ -331,13 +338,9 @@ function M.call_llm(input_text, mode, callback)
         local content = ""
         
         if provider == "anthropic" then
-          if decoded.content and decoded.content[1] then
-            content = decoded.content[1].text
-          end
+          if decoded.content and decoded.content[1] then content = decoded.content[1].text end
         elseif provider == "zhipu" then
-          if decoded.choices and decoded.choices[1] then
-            content = decoded.choices[1].message.content
-          end
+          if decoded.choices and decoded.choices[1] then content = decoded.choices[1].message.content end
         end
 
         if content and content ~= "" then
@@ -397,7 +400,7 @@ function M.action_insert()
       local cursor_line = cursor_pos[1]
       local lines = vim.split(response, "\n")
       vim.api.nvim_buf_set_lines(0, cursor_line, cursor_line, false, lines)
-    end)
+    end, file_content) -- Pass file content here
   end)
 end
 

@@ -406,24 +406,36 @@ end
 -- -------------------------------------------------------------------------------
 
 function M.action_replace()
-  -- Force getting visual selection by exiting visual mode first to update marks
-  vim.cmd('noau normal! "vy') 
-  local selection = vim.fn.getreg('"')
+  -- Get the visual selection marks
+  local start_pos = vim.fn.getpos("'<")
+  local end_pos = vim.fn.getpos("'>")
   
-  if not selection or selection == "" then 
-    vim.notify("No selection found", vim.log.levels.WARN)
+  -- Extract the text to be replaced
+  local selection = M.get_visual_selection()
+  if selection == "" then 
+    vim.notify("[Wellm] No selection found.", vim.log.levels.WARN)
     return 
   end
-  
-  vim.notify("[Wellm] Replacing...", vim.log.levels.INFO)
-  
-  M.call_llm(selection, "replace", function(response)
-    local lines = vim.split(response, "\n")
+
+  -- Ask the user what they want to do with this specific code
+  vim.ui.input({ prompt = "Instruction to replace: " }, function(input)
+    if not input or input == "" then return end
     
-    -- We use standard paste to replace selection
-    vim.fn.setreg('"', response)
-    vim.cmd('normal! gv"vp')
-    vim.notify("[Wellm] Done.", vim.log.levels.INFO)
+    vim.notify("[Wellm] Thinking...", vim.log.levels.INFO)
+    
+    -- We pass 'selection' as the main text and 'replace' as the mode
+    M.call_llm(input, "replace", function(response)
+      local lines = vim.split(response, "\n")
+      
+      -- Convert 1-based positions to 0-based for API
+      local s_row, s_col = start_pos[2] - 1, start_pos[3] - 1
+      local e_row, e_col = end_pos[2] - 1, end_pos[3]
+
+      -- This specifically replaces ONLY the highlighted characters
+      vim.api.nvim_buf_set_text(0, s_row, s_col, e_row, e_col, lines)
+      
+      vim.notify("[Wellm] Code rewritten.", vim.log.levels.INFO)
+    end, selection) -- Pass the selected code as the 'file_context' parameter
   end)
 end
 

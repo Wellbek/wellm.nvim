@@ -291,90 +291,110 @@ end
 
 function M.call_llm(input_text, mode, callback, file_context)
   local messages, system_prompt = M.build_payload(input_text, mode, file_context)
-  
-  -- Create JSON Body
-  local body_data = {
-    model = M.config.model,
-    max_tokens = M.config.max_tokens,
-    messages = messages,
-  }
+  local api_key = M.config.api_key
+  local model = M.config.model
+  local provider = M.config.provider
 
-  local url = ""
-  local headers = { "-H", "content-type: application/json" }
-
-  if M.config.provider == "anthropic" then
-    url = "[https://api.anthropic.com/v1/messages](https://api.anthropic.com/v1/messages)"
-    table.insert(headers, "-H"); table.insert(headers, "x-api-key: " .. M.config.api_key)
-    table.insert(headers, "-H"); table.insert(headers, "anthropic-version: 2023-06-01")
-    body_data.system = system_prompt
-  elseif M.config.provider == "zhipu" then
-    url = "[https://open.bigmodel.cn/api/paas/v4/chat/completions](https://open.bigmodel.cn/api/paas/v4/chat/completions)"
-    table.insert(headers, "-H"); table.insert(headers, "Authorization: Bearer " .. M.config.api_key)
-    table.insert(body_data.messages, 1, { role = "system", content = system_prompt })
+  if not api_key then
+    vim.notify("Missing API Key", vim.log.levels.ERROR)
+    return
   end
 
-  -- Write body to temp file to avoid shell escaping issues
-  local tmp_fname = os.tmpname()
-  local f = io.open(tmp_fname, "w+")
-  if not f then vim.notify("Could not create temp file", vim.log.levels.ERROR) return end
-  f:write(vim.fn.json_encode(body_data))
-  f:close()
+  local url, headers, body
 
-  local curl_args = { "curl", "-s", "--no-buffer", "-X", "POST", url, "-d", "@" .. tmp_fname }
-  for _, h in ipairs(headers) do table.insert(curl_args, h) end
+  -- Handle different Providers (Back to your working logic)
+  if provider == "anthropic" then
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+      "-H", string.format("x-api-key: %s", api_key),
+      "-H", "anthropic-version: 2023-06-01",
+      "-H", "content-type: application/json",
+    }
+    body = vim.fn.json_encode({
+      model = model,
+      system = system_prompt,
+      messages = messages,
+      max_tokens = M.config.max_tokens
+    })
+  elseif provider == "zhipu" then
+    url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    table.insert(messages, 1, { role = "system", content = system_prompt })
+    headers = {
+      "-H", string.format("Authorization: Bearer %s", api_key),
+      "-H", "content-type: application/json",
+    }
+    body = vim.fn.json_encode({
+      model = model,
+      messages = messages,
+      max_tokens = M.config.max_tokens
+    })
+  else
+    vim.notify("Unknown provider: " .. provider, vim.log.levels.ERROR)
+    return
+  end
+
+  -- Write body to a temp file to prevent shell escaping errors
+  local tmp_body = os.tmpname()
+  local f = io.open(tmp_body, "w")
+  if f then
+    f:write(body)
+    f:close()
+  end
 
   if M.config.auto_open_chat and mode == "chat" then M.open_chat() end
 
-  local output_data = {}
-  
-  M.state.job_id = vim.fn.jobstart(curl_args, {
-    stdout_buffered = false, -- We handle buffering manually in on_stdout/on_exit
+  -- Construct Curl Command
+  local curl_args = { "curl", "-s", "-X", "POST", url }
+  for _, h in ipairs(headers) do table.insert(curl_args, h) end
+  table.insert(curl_args, "-d")
+  table.insert(curl_args, "@" .. tmp_body) -- Read body from file
+
+  local response_chunks = {}
+
+  vim.fn.jobstart(curl_args, {
+    stdout_buffered = false,
     on_stdout = function(_, data)
       if data then
         for _, line in ipairs(data) do
-          table.insert(output_data, line)
+          if line ~= "" then table.insert(response_chunks, line) end
         end
       end
     end,
     on_exit = function(_, exit_code)
-      os.remove(tmp_fname) -- cleanup
+      -- Clean up temp file
+      os.remove(tmp_body)
 
       if exit_code ~= 0 then
-        vim.schedule(function() vim.notify("LLM Request Failed. Code: " .. exit_code, vim.log.levels.ERROR) end)
+        vim.schedule(function() 
+          vim.notify("Wellm: Curl failed with code " .. exit_code, vim.log.levels.ERROR) 
+        end)
         return
       end
 
-      -- Decode full response
-      local raw_response = table.concat(output_data, "")
-      local ok, decoded = pcall(vim.fn.json_decode, raw_response)
+      local response = table.concat(response_chunks, "")
+      local ok, decoded = pcall(vim.fn.json_decode, response)
       
-      vim.schedule(function() 
+      vim.schedule(function()
         if not ok then
-          vim.notify("Failed to decode JSON response", vim.log.levels.ERROR)
-          print("DEBUG RAW:", raw_response)
-          return
-        end
-        
-        -- Extract content based on provider
-        local text = ""
-        if decoded.content and decoded.content[1] then -- Anthropic
-          text = decoded.content[1].text
-        elseif decoded.choices and decoded.choices[1] then -- OpenAI/Zhipu
-          text = decoded.choices[1].message.content
-        elseif decoded.error then
-          vim.notify("API Error: " .. (decoded.error.message or "Unknown"), vim.log.levels.ERROR)
+          vim.notify("Wellm: Failed to decode response", vim.log.levels.ERROR)
           return
         end
 
-        -- Cleanup Markdown for code actions
-        if mode == "replace" or mode == "insert" then
-          text = text:gsub("^```%w+%s*\n", ""):gsub("\n```%s*$", "")
+        local content = ""
+        if provider == "anthropic" then
+          content = (decoded.content and decoded.content[1]) and decoded.content[1].text or ""
+        elseif provider == "zhipu" then
+          content = (decoded.choices and decoded.choices[1]) and decoded.choices[1].message.content or ""
         end
 
-        if text and text ~= "" then
-          callback(text)
+        if content ~= "" then
+          -- Clean markdown for code-only actions
+          if mode == "replace" or mode == "insert" then
+            content = content:gsub("^```%w*\n", ""):gsub("```$", "")
+          end
+          callback(content)
         else
-          vim.notify("LLM returned empty content", vim.log.levels.WARN)
+          vim.notify("Wellm: Empty response from AI", vim.log.levels.WARN)
         end
       end)
     end,

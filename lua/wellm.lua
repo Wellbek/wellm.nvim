@@ -406,6 +406,9 @@ end
 -- -------------------------------------------------------------------------------
 
 function M.action_replace()
+  -- Force exit visual mode to update the '< and '> marks
+  vim.cmd('normal! \27') 
+  
   -- Get the visual selection marks
   local start_pos = vim.fn.getpos("'<")
   local end_pos = vim.fn.getpos("'>")

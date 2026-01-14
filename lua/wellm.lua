@@ -406,69 +406,76 @@ end
 -- -------------------------------------------------------------------------------
 
 function M.action_replace()
-  -- 1. Exit visual mode to set the '< and '> marks
-  vim.cmd('normal! \27') 
-  
-  local start_pos = vim.fn.getpos("'<")
-  local end_pos = vim.fn.getpos("'>")
+  -- 1. Force exit visual mode to update the '< and '> marks
+  local mode = vim.api.nvim_get_mode().mode
+  if mode:find("[vV]") then
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true)
+  end
 
-  -- 0-indexed rows for the API
-  local s_row, e_row = start_pos[2] - 1, end_pos[2] - 1
-  -- 1-indexed columns for string.sub
-  local s_col_1, e_col_1 = start_pos[3], end_pos[3]
-  
-  local lines = vim.api.nvim_buf_get_lines(0, s_row, e_row + 1, false)
-  if #lines == 0 then return end
-  
-  -- Extract selection for the LLM
-  -- Note: We handle the last line first so we don't mess up indices
-  lines[#lines] = string.sub(lines[#lines], 1, e_col_1)
-  lines[1] = string.sub(lines[1], s_col_1)
-  local selection = table.concat(lines, "\n")
+  -- Small delay to ensure marks are updated in the buffer
+  vim.schedule(function()
+    local start_pos = vim.fn.getpos("'<")
+    local end_pos = vim.fn.getpos("'>")
 
-  vim.ui.input({ prompt = "Instruction to replace: " }, function(input)
-    if not input or input == "" then return end
+    -- 0-indexed rows
+    local s_row, e_row = start_pos[2] - 1, end_pos[2] - 1
+    -- Byte-indexed columns
+    local s_col = start_pos[3] - 1
+    local e_col = end_pos[3]
     
-    vim.notify("[Wellm] Thinking...", vim.log.levels.INFO)
+    local last_line = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1] or ""
+    local max_bytes = #last_line
+    if e_col > max_bytes then
+      e_col = max_bytes
+    end
+
+    -- 2. Fetch the selection using the safer get_text API
+    local success_get, selection_lines = pcall(vim.api.nvim_buf_get_text, 0, s_row, s_col, e_row, e_col, {})
     
-    M.call_llm(input, "replace", function(response)
-      -- Use schedule to ensure we are in a valid state for buffer edits
-      vim.schedule(function()
-        local new_lines = vim.split(response, "\n")
-        
-        -- Get the current state of the end line (it might have changed!)
-        local line_content = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1]
-        if not line_content then 
-          vim.notify("[Wellm] Error: Selection range no longer exists.", vim.log.levels.ERROR)
-          return 
+    if not success_get or #selection_lines == 0 then
+      vim.notify("[Wellm] Could not grab selection text.", vim.log.levels.ERROR)
+      return
+    end
+    
+    local selection = table.concat(selection_lines, "\n")
+
+    -- 3. Prompt user
+    vim.ui.input({ prompt = "Instruction to replace: " }, function(input)
+      if not input or input == "" then return end
+      
+      vim.notify("[Wellm] Thinking...", vim.log.levels.INFO)
+      
+      M.call_llm(input, "replace", function(response)
+        if not response or response == "" then
+          vim.schedule(function() vim.notify("[Wellm] AI returned empty content.", vim.log.levels.WARN) end)
+          return
         end
 
-        local line_len = #line_content
-        
-        -- CORRECTING THE END COLUMN:
-        -- 'getpos' column is 1-indexed. In inclusive visual mode, the mark is ON the last char.
-        -- nvim_buf_set_text's end_col is EXCLUSIVE. 
-        -- So if we select 1 char at col 5, start=4, end=5.
-        local s_col_api = start_pos[3] - 1
-        local e_col_api = end_pos[3]
+        vim.schedule(function()
+          -- Clean the response: Split by newline
+          -- Use plain=true to avoid regex overhead
+          local new_lines = vim.split(response, "\n", { plain = true })
 
-        -- Visual Block mode or Selecting to end of line can return v:maxcol (2147483647)
-        if e_col_api > line_len then
-          e_col_api = line_len
-        end
+          -- 4. Final Safety Check: Check if buffer state still matches
+          local current_last_line = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1]
+          if not current_last_line then
+             vim.notify("[Wellm] Buffer changed; cannot replace.", vim.log.levels.ERROR)
+             return
+          end
 
-        -- Final Safety: Ensure start isn't after end
-        if s_row == e_row and s_col_api > e_col_api then
-            s_col_api, e_col_api = e_col_api, s_col_api
-        end
-
-        vim.api.nvim_buf_set_text(0, s_row, s_col_api, e_row, e_col_api, new_lines)
-        vim.notify("[Wellm] Code rewritten.", vim.log.levels.INFO)
-      end)
-    end, selection)
+          -- Perform the atomic replacement
+          local success_set, err = pcall(vim.api.nvim_buf_set_text, 0, s_row, s_col, e_row, e_col, new_lines)
+          
+          if success_set then
+            vim.notify("[Wellm] Successfully replaced.", vim.log.levels.INFO)
+          else
+            vim.notify("[Wellm] Replace failed: " .. tostring(err), vim.log.levels.ERROR)
+          end
+        end)
+      end, selection)
+    end)
   end)
 end
-
 function M.action_insert()
   local file_content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
   

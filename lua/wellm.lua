@@ -406,76 +406,78 @@ end
 -- -------------------------------------------------------------------------------
 
 function M.action_replace()
-  -- 1. Force exit visual mode to update the '< and '> marks
+  -- 1. Ensure marks are updated by exiting visual mode if necessary
   local mode = vim.api.nvim_get_mode().mode
   if mode:find("[vV]") then
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true)
   end
 
-  -- Small delay to ensure marks are updated in the buffer
+  -- Schedule ensures the <Esc> has processed and marks are set
   vim.schedule(function()
-    local start_pos = vim.fn.getpos("'<")
-    local end_pos = vim.fn.getpos("'>")
-
-    -- 0-indexed rows
-    local s_row, e_row = start_pos[2] - 1, end_pos[2] - 1
-    -- Byte-indexed columns
-    local s_col = start_pos[3] - 1
-    local e_col = end_pos[3]
+    local start_mark = vim.fn.getpos("'<")
+    local end_mark = vim.fn.getpos("'>")
     
-    local last_line = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1] or ""
-    local max_bytes = #last_line
-    if e_col > max_bytes then
-      e_col = max_bytes
+    -- API uses 0-indexed rows, getpos uses 1-indexed
+    local s_row, s_col = start_mark[2] - 1, start_mark[3] - 1
+    local e_row, e_col = end_mark[2] - 1, end_mark[3]
+
+    -- Handle empty selection or invalid marks: fallback to cursor position
+    local is_empty = false
+    if s_row < 0 or (s_row == e_row and s_col == e_col) then
+      is_empty = true
+      local cursor = vim.api.nvim_win_get_cursor(0)
+      s_row, s_col = cursor[1] - 1, cursor[2]
+      e_row, e_col = s_row, s_col
     end
 
-    -- 2. Fetch the selection using the safer get_text API
-    local success_get, selection_lines = pcall(vim.api.nvim_buf_get_text, 0, s_row, s_col, e_row, e_col, {})
-    
-    if not success_get or #selection_lines == 0 then
-      vim.notify("[Wellm] Could not grab selection text.", vim.log.levels.ERROR)
-      return
+    -- Safety check for end-of-line selection ($)
+    -- nvim_buf_get_text/set_text needs valid byte offsets
+    local last_line_content = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1] or ""
+    if e_col > #last_line_content then
+      e_col = #last_line_content
     end
-    
-    local selection = table.concat(selection_lines, "\n")
 
-    -- 3. Prompt user
-    vim.ui.input({ prompt = "Instruction to replace: " }, function(input)
+    -- 2. Capture the context to send to AI
+    local selection_text = ""
+    if not is_empty then
+      local lines = vim.api.nvim_buf_get_text(0, s_row, s_col, e_row, e_col, {})
+      selection_text = table.concat(lines, "\n")
+    else
+      -- If empty, provide the whole file as context so AI knows where it's inserting
+      selection_text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    end
+
+    -- 3. Get User Instruction
+    vim.ui.input({ prompt = is_empty and "AI Insert: " or "AI Replace Selection: " }, function(input)
       if not input or input == "" then return end
       
-      vim.notify("[Wellm] Thinking...", vim.log.levels.INFO)
+      vim.notify("[Wellm] Processing...", vim.log.levels.INFO)
       
+      -- 4. Call LLM
+      -- We pass 'selection_text' as the 'file_context' argument
       M.call_llm(input, "replace", function(response)
         if not response or response == "" then
-          vim.schedule(function() vim.notify("[Wellm] AI returned empty content.", vim.log.levels.WARN) end)
+          vim.notify("[Wellm] AI returned no content.", vim.log.levels.WARN)
           return
         end
 
         vim.schedule(function()
-          -- Clean the response: Split by newline
-          -- Use plain=true to avoid regex overhead
           local new_lines = vim.split(response, "\n", { plain = true })
-
-          -- 4. Final Safety Check: Check if buffer state still matches
-          local current_last_line = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1]
-          if not current_last_line then
-             vim.notify("[Wellm] Buffer changed; cannot replace.", vim.log.levels.ERROR)
-             return
-          end
-
-          -- Perform the atomic replacement
-          local success_set, err = pcall(vim.api.nvim_buf_set_text, 0, s_row, s_col, e_row, e_col, new_lines)
           
-          if success_set then
-            vim.notify("[Wellm] Successfully replaced.", vim.log.levels.INFO)
+          -- Atomic replacement of the exact range
+          local success, err = pcall(vim.api.nvim_buf_set_text, 0, s_row, s_col, e_row, e_col, new_lines)
+          
+          if success then
+            vim.notify("[Wellm] Applied changes.", vim.log.levels.INFO)
           else
-            vim.notify("[Wellm] Replace failed: " .. tostring(err), vim.log.levels.ERROR)
+            vim.notify("[Wellm] Error: " .. tostring(err), vim.log.levels.ERROR)
           end
         end)
-      end, selection)
+      end, selection_text)
     end)
   end)
 end
+
 function M.action_insert()
   local file_content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
   

@@ -428,16 +428,23 @@ function M.action_replace()
     
     vim.notify("[Wellm] Thinking...", vim.log.levels.INFO)
     
-    M.call_llm(input, "replace", function(response)
-      local new_lines = vim.split(response, "\n")
-      
-      -- Convert 1-based positions to 0-based for API
-      local api_s_row, api_s_col = start_pos[2] - 1, start_pos[3] - 1
-      local api_e_row, api_e_col = end_pos[2] - 1, end_pos[3]
+M.call_llm(input, "replace", function(response)
+  local lines = vim.split(response, "\n")
+  
+  -- Convert start to 0-indexed
+  local s_row, s_col = start_pos[2] - 1, start_pos[3] - 1
+  -- Convert end to 0-indexed
+  local e_row = end_pos[2] - 1
+  
+  local line_content = vim.api.nvim_buf_get_lines(0, e_row, e_row + 1, false)[1] or ""
+  local line_len = #line_content -- Get length in bytes
+  
+  local e_col = math.min(end_pos[3], line_len)
 
-      vim.api.nvim_buf_set_text(0, api_s_row, api_s_col, api_e_row, api_e_col, new_lines)
-      vim.notify("[Wellm] Code rewritten.", vim.log.levels.INFO)
-    end, selection)
+  vim.api.nvim_buf_set_text(0, s_row, s_col, e_row, e_col, lines)
+  
+  vim.notify("[Wellm] Code rewritten.", vim.log.levels.INFO)
+end, selection)
   end)
 end
 

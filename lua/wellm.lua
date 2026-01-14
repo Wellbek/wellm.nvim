@@ -406,39 +406,38 @@ end
 -- -------------------------------------------------------------------------------
 
 function M.action_replace()
-  -- Force exit visual mode to update the '< and '> marks
+  -- Exit visual mode to update the '< and '> marks
   vim.cmd('normal! \27') 
   
-  -- Get the visual selection marks
   local start_pos = vim.fn.getpos("'<")
   local end_pos = vim.fn.getpos("'>")
-  
-  -- Extract the text to be replaced
-  local selection = M.get_visual_selection()
-  if selection == "" then 
-    vim.notify("[Wellm] No selection found.", vim.log.levels.WARN)
-    return 
-  end
 
-  -- Ask the user what they want to do with this specific code
+  local s_row, s_col = start_pos[2], start_pos[3]
+  local e_row, e_col = end_pos[2], end_pos[3]
+  
+  local lines = vim.api.nvim_buf_get_lines(0, s_row - 1, e_row, false)
+  if #lines == 0 then return end
+  
+  -- Basic character-wise selection cleanup
+  lines[#lines] = string.sub(lines[#lines], 1, e_col)
+  lines[1] = string.sub(lines[1], s_col)
+  local selection = table.concat(lines, "\n")
+
   vim.ui.input({ prompt = "Instruction to replace: " }, function(input)
     if not input or input == "" then return end
     
     vim.notify("[Wellm] Thinking...", vim.log.levels.INFO)
     
-    -- We pass 'selection' as the main text and 'replace' as the mode
     M.call_llm(input, "replace", function(response)
-      local lines = vim.split(response, "\n")
+      local new_lines = vim.split(response, "\n")
       
       -- Convert 1-based positions to 0-based for API
-      local s_row, s_col = start_pos[2] - 1, start_pos[3] - 1
-      local e_row, e_col = end_pos[2] - 1, end_pos[3]
+      local api_s_row, api_s_col = start_pos[2] - 1, start_pos[3] - 1
+      local api_e_row, api_e_col = end_pos[2] - 1, end_pos[3]
 
-      -- This specifically replaces ONLY the highlighted characters
-      vim.api.nvim_buf_set_text(0, s_row, s_col, e_row, e_col, lines)
-      
+      vim.api.nvim_buf_set_text(0, api_s_row, api_s_col, api_e_row, api_e_col, new_lines)
       vim.notify("[Wellm] Code rewritten.", vim.log.levels.INFO)
-    end, selection) -- Pass the selected code as the 'file_context' parameter
+    end, selection)
   end)
 end
 

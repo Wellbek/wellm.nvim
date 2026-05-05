@@ -14,7 +14,7 @@ local usage     = require("wellm.usage")
 local session   = require("wellm.session")
 local spinner   = require("wellm.ui.spinner")
 
--- Payload builder 
+-- Payload builder
 
 --- Build the messages array and system prompt for the API call.
 --- mode: "replace" | "insert" | "chat" | "orient"
@@ -58,7 +58,7 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   return messages, sys
 end
 
--- READ loop 
+-- READ loop
 
 local function extract_reads(text)
   local reads = {}
@@ -89,7 +89,7 @@ local function inject_read_files(reads)
   return injected, missing
 end
 
--- Raw curl call 
+-- Raw curl call
 
 --- Fire a single API call. On completion, calls cb(content, usage_data, err).
 function M.raw_call(messages, sys, cb)
@@ -109,7 +109,7 @@ function M.raw_call(messages, sys, cb)
 
   local chunks = {}
 
-  require("wellm.state").data.job_id = vim.fn.jobstart(curl_cmd, {
+  state.data.job_id = vim.fn.jobstart(curl_cmd, {
     stdout_buffered = true,
     on_stdout = function(_, data)
       if data then
@@ -142,7 +142,7 @@ function M.raw_call(messages, sys, cb)
   })
 end
 
--- Public call (with READ loop) 
+-- Public call (with READ loop)
 
 --- Call the LLM for a given mode, with optional extra file context.
 --- callback(response_text) is called on success.
@@ -179,13 +179,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       -- Record usage
       if used then
-        require("wellm.usage").record(cfg.model, used.input_tokens, used.output_tokens)
+        usage.record(cfg.model, used.input_tokens, used.output_tokens)
       end
 
-      -- Extract and log any [DECISION] markers
-      require("wellm.wellagent").extract_decisions(content)
+      wellagent.extract_decisions(content)
 
-      -- Check if the model wants to read files
       local reads = extract_reads(content)
       if #reads > 0 and read_count < max_reads then
         spinner.set_status("reading files...")
@@ -194,7 +192,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
         -- Append the model's "thinking" turn + user acknowledgement, then re-call
         table.insert(msgs, { role = "assistant", content = content })
-        
+
         local feedback = "Files injected. Please continue with your full answer."
         if #missing > 0 then
           feedback = "Error: These files were not found: " .. table.concat(missing, ", ") .. ". Proceed with existing context."
@@ -210,21 +208,17 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       end
 
       -- Clean code-only responses
-    if mode == "replace" or mode == "insert" then
-      content = content
-        :gsub("^```%w*\n", "")
-        :gsub("\n-```$", "")
-    end
+      if mode == "replace" or mode == "insert" then
+        content = content
+          :gsub("^```%w*\n", "")
+          :gsub("\n```$", "")
+      end
 
-      -- Append to history
-      -- (user message was already appended before calling; append assistant now)
-      table.insert(require("wellm.state").data.history, { role = "user", content = user_text })
-      spinner.start("LLM thinking...")
-      attempt(messages, sys)
+      table.insert(state.data.history, { role = "user",      content = user_text })
+      table.insert(state.data.history, { role = "assistant", content = content })
 
-      -- Auto-save session
       if cfg.sessions and cfg.sessions.save_automatically then
-        require("wellm.session").auto_save()
+        session.auto_save()
       end
 
       spinner.stop()
@@ -232,12 +226,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     end)
   end
 
-  -- Add user message to history before firing (so history stays consistent)
-  table.insert(require("wellm.state").data.history, { role = "user", content = user_text })
+  spinner.start("LLM thinking...")
   attempt(messages, sys)
 end
 
--- Orient call 
+-- Orient call
 
 --- One-shot call to generate OVERVIEW.md + STRUCTURE.md for a project.
 function M.orient(on_done)
@@ -254,7 +247,7 @@ function M.orient(on_done)
 
   spinner.start("Orienting project...")
 
-  raw_call(msgs, sys, function(content, used, err)
+  M.raw_call(msgs, sys, function(content, used, err)
     if err or not content or content == "" then
       spinner.stop()
       vim.notify("[Wellm] Orient failed: " .. tostring(err), vim.log.levels.ERROR)

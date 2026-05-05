@@ -99,7 +99,18 @@ local function submit(buf, win)
 
   local llm = require("wellm.llm")
   llm.call(input, "chat", function(response)
-    render_all(buf, win)
+    if not response or response == "" then
+      -- Instead of silence, show the error in the chat UI
+      buf_append(buf, { 
+        "## ASSISTANT", 
+        "", 
+        "> [!] Wellm Error: The API returned an empty response or failed to parse the prompt.", 
+        "", 
+        SEPARATOR, "" 
+      })
+    else
+      render_all(buf, win)
+    end
     scroll_bottom(win, buf)
   end)
 end

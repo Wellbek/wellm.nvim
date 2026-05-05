@@ -89,7 +89,7 @@ FORBIDDEN IN CODE OUTPUT:
 
     chat = [=[You are a helpful AI coding assistant inside Neovim.
 When you need to read a specific file from the project to answer, output: [READ: relative/path/to/file.ext]
-Only request files that actually exist in the project structure provided to you.]=]
+Only request files that actually exist in the project structure provided to you.]=],
 
     orient = [[Analyse this software project and produce two markdown sections.
 

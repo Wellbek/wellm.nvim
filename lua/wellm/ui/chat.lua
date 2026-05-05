@@ -6,11 +6,11 @@
 --   > [input line]
 local M = {}
 
-local state   = require("wellm.state")
-local llm     = require("wellm.llm")
-local session = require("wellm.session")
+-- local state   = require("wellm.state")
+-- local llm     = require("wellm.llm")
+-- local session = require("wellm.session")
 
-local SEPARATOR = string.rep("", 60)
+local SEPARATOR = string.rep("-", 60)
 local INPUT_PFX = "> "
 
 -- Buffer helpers 
@@ -38,6 +38,7 @@ end
 -- Render history 
 
 local function render_all(buf, win)
+  local state = require("wellm.state")
   local lines = {}
 
   -- Header
@@ -96,6 +97,7 @@ local function submit(buf, win)
   })
   scroll_bottom(win, buf)
 
+  local llm = require("wellm.llm")
   llm.call(input, "chat", function(response)
     render_all(buf, win)
     scroll_bottom(win, buf)
@@ -105,6 +107,9 @@ end
 -- Open / focus 
 
 function M.open()
+  local state = require("wellm.state")
+  local session = require("wellm.session")
+
   -- Re-focus if already open
   if state.data.chat_win and vim.api.nvim_win_is_valid(state.data.chat_win) then
     vim.api.nvim_set_current_win(state.data.chat_win)

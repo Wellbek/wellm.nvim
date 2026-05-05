@@ -162,6 +162,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
   local function attempt(msgs, s)
     M.raw_call(msgs, s, function(content, used, err)
+      -- Record usage regardless of error status 
+      if used then
+        usage.record(cfg.model, used.input_tokens, used.output_tokens)
+      end
+      
       if err then
         spinner.stop()
         local ui_err = "> [!] API Error: " .. tostring(err)
@@ -248,6 +253,11 @@ function M.orient(on_done)
   spinner.start("Orienting project...")
 
   M.raw_call(msgs, sys, function(content, used, err)
+    -- Record usage regardless of error status 
+    if used then
+      usage.record(cfg.model, used.input_tokens, used.output_tokens)
+    end
+
     if err or not content or content == "" then
       spinner.stop()
       vim.notify("[Wellm] Orient failed: " .. tostring(err), vim.log.levels.ERROR)

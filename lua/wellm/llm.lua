@@ -61,7 +61,7 @@ end
 
 local function extract_reads(text)
   local reads = {}
-  for path in text:gmatch("%[READ: ([^\]]+)%]") do
+  for path in text:gmatch("%[READ: ([^%]]+)%]") do
     -- Resolve relative to project root
     local proj = wellagent.get_project_root()
     local full  = (path:sub(1, 1) == "/") and path or (proj .. "/" .. path)

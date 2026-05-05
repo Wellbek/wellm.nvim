@@ -46,7 +46,7 @@ function M.open()
   end
 
   table.insert(lines, "")
-  table.insert(lines, "> Prices are estimates based on Anthropic's published rates.")
+  table.insert(lines, "> Prices are estimates based on providers' officially published rates.")
   table.insert(lines, "> Update wellm/usage.lua:pricing{} to reflect current pricing.")
   table.insert(lines, "")
   table.insert(lines, "  q / <Esc> = close")

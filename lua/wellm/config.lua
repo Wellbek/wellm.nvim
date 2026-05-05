@@ -16,21 +16,21 @@ M.pricing = {
   ["claude-haiku-3"]    = { input = 0.25,  output = 1.25 },
 
   -- GLM models
-  ["glm-5-1"]           = { input = 1.4,   output = 4.4  },
+  ["glm-5.1"]           = { input = 1.4,   output = 4.4  },
   ["glm-5"]             = { input = 1.0,   output = 3.2  },
   ["glm-5-turbo"]       = { input = 1.2,   output = 4.0  },
-  ["glm-4-7"]           = { input = 0.6,   output = 2.2  },
-  ["glm-4-7-flashx"]    = { input = 0.07,  output = 0.4  },
-  ["glm-4-6"]           = { input = 0.6,   output = 2.2  },
-  ["glm-4-5"]           = { input = 0.6,   output = 2.2  },
-  ["glm-4-5-x"]         = { input = 2.2,   output = 8.9  },
-  ["glm-4-5-air"]       = { input = 0.2,   output = 1.1  },
-  ["glm-4-5-airx"]      = { input = 1.1,   output = 4.5  },
-  ["glm-4-32b"]         = { input = 0.1,   output = 0.1  },
+  ["glm-4.7"]           = { input = 0.6,   output = 2.2  },
+  ["glm-4.7-flashx"]    = { input = 0.07,  output = 0.4  },
+  ["glm-4.6"]           = { input = 0.6,   output = 2.2  },
+  ["glm-4.5"]           = { input = 0.6,   output = 2.2  },
+  ["glm-4.5-x"]         = { input = 2.2,   output = 8.9  },
+  ["glm-4.5-air"]       = { input = 0.2,   output = 1.1  },
+  ["glm-4.5-airx"]      = { input = 1.1,   output = 4.5  },
+  ["glm-4.32b"]         = { input = 0.1,   output = 0.1  },
 
   -- Free tiers (treated as zero cost)
-  ["glm-4-7-flash"]     = { input = 0.0,   output = 0.0  },
-  ["glm-4-5-flash"]     = { input = 0.0,   output = 0.0  },
+  ["glm-4.7-flash"]     = { input = 0.0,   output = 0.0  },
+  ["glm-4.5-flash"]     = { input = 0.0,   output = 0.0  },
 }
 
 M.defaults = {

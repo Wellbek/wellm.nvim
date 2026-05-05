@@ -110,31 +110,42 @@ function M.open()
   local state = require("wellm.state")
   local session = require("wellm.session")
 
-  -- Re-focus if already open
+  -- If window is already open, just jump to it
   if state.data.chat_win and vim.api.nvim_win_is_valid(state.data.chat_win) then
     vim.api.nvim_set_current_win(state.data.chat_win)
     return
   end
 
-  -- Create scratch buffer
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_name(buf, "Wellm Chat")
-  vim.api.nvim_buf_set_option(buf, "filetype", "markdown")
-  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(buf, "swapfile", false)
+  -- Handle the Buffer (Re-use or Create)
+  local buf = state.data.chat_buffer
+  
+  -- If we don't have a valid buffer yet, create it
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, "Wellm Chat")
+    vim.api.nvim_buf_set_option(buf, "filetype", "markdown")
+    vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+    vim.api.nvim_buf_set_option(buf, "swapfile", false)
+    state.data.chat_buffer = buf
+  end
 
+  -- Create the Window
   local width = math.max(60, math.floor(vim.o.columns * 0.38))
   local win = vim.api.nvim_open_win(buf, true, {
-    split = "right", width = width, style = "minimal",
+    split = "right", 
+    width = width, 
+    style = "minimal",
   })
+
+  -- Window options
   vim.api.nvim_win_set_option(win, "wrap", true)
   vim.api.nvim_win_set_option(win, "linebreak", true)
   vim.api.nvim_win_set_option(win, "number", false)
   vim.api.nvim_win_set_option(win, "signcolumn", "no")
 
-  state.data.chat_buffer = buf
-  state.data.chat_win    = win
+  state.data.chat_win = win
 
+  -- Initial Render
   render_all(buf, win)
 
   --  Keymaps 

@@ -86,10 +86,10 @@ FORBIDDEN IN CODE OUTPUT:
 - No "Here we..." / "This function..." / "Your approach ..." style explanations
 ]],
 
-    chat = [[You are a helpful AI coding assistant inside Neovim (Wellm plugin).
+    chat = [=[You are a helpful AI coding assistant inside Neovim (Wellm plugin).
 You have access to project context and selected files.
 Be concise. Use Markdown. Show code examples when useful.
-When you need to read a specific file to answer, output: [READ: path/to/file]]],
+When you need to read a specific file to answer, output: [READ: path/to/file]]=],
 
     orient = [[Analyse this software project and produce two markdown sections.
 

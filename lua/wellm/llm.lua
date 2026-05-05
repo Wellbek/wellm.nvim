@@ -90,6 +90,59 @@ end
 
 -- Raw curl call 
 
+--- Fire a single API call. On completion, calls cb(content, usage_data, err).
+function M.raw_call(messages, sys, cb)
+  local cfg      = require("wellm").config
+  local provider = require("wellm.providers").get(cfg.provider)
+  local req      = provider.build_request(cfg, messages, sys)
+
+  -- Write body to tempfile to avoid shell-escaping issues
+  local tmp = os.tmpname()
+  local f   = io.open(tmp, "w")
+  if f then f:write(req.body); f:close() end
+
+  local curl_cmd = { "curl", "-s", "-X", "POST", req.url }
+  for _, h in ipairs(req.headers) do table.insert(curl_cmd, h) end
+  table.insert(curl_cmd, "-d")
+  table.insert(curl_cmd, "@" .. tmp)
+
+  local chunks = {}
+
+  require("wellm.state").data.job_id = vim.fn.jobstart(curl_cmd, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if data then
+        for _, line in ipairs(data) do
+          if line ~= "" then table.insert(chunks, line) end
+        end
+      end
+    end,
+    on_exit = function(_, code)
+      os.remove(tmp)
+      if code ~= 0 then
+        vim.schedule(function()
+          cb(nil, nil, "curl exited with code " .. code)
+        end)
+        return
+      end
+
+      local raw = table.concat(chunks, "")
+      local ok, decoded = pcall(vim.fn.json_decode, raw)
+
+      vim.schedule(function()
+        if not ok then
+          cb(nil, nil, "JSON decode failed: " .. raw:sub(1, 200))
+          return
+        end
+        local content, used, err = provider.parse_response(decoded)
+        cb(content, used, err)
+      end)
+    end,
+  })
+end
+
+-- Public call (with READ loop) 
+
 --- Call the LLM for a given mode, with optional extra file context.
 --- callback(response_text) is called on success.
 function M.call(user_text, mode, callback, extra_file_ctx)
@@ -103,11 +156,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
-  local max_reads     = 5    -- prevent infinite loops
+  local max_reads     = 3    -- prevent infinite loops
   local read_count    = 0
 
   local function attempt(msgs, s)
-    raw_call(msgs, s, function(content, used, err)
+    M.raw_call(msgs, s, function(content, used, err)
       if err then
         local ui_err = "> [!] API Error: " .. tostring(err)
         vim.notify(ui_err, vim.log.levels.ERROR)
@@ -123,11 +176,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       -- Record usage
       if used then
-        usage.record(cfg.model, used.input_tokens, used.output_tokens)
+        require("wellm.usage").record(cfg.model, used.input_tokens, used.output_tokens)
       end
 
       -- Extract and log any [DECISION] markers
-      wellagent.extract_decisions(content)
+      require("wellm.wellagent").extract_decisions(content)
 
       -- Check if the model wants to read files
       local reads = extract_reads(content)
@@ -153,19 +206,20 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       -- Clean code-only responses
       if mode == "replace" or mode == "insert" then
-        content = content:gsub("^```%w*\n", ""):gsub("\n?```$", "")
+        content = content:gsub("^```%w*\n", ""):gsub("\n?
+```$", "")
       end
 
       -- Append to history
       -- (user message was already appended before calling; append assistant now)
-      table.insert(state.data.history, {
+      table.insert(require("wellm.state").data.history, {
         role    = "assistant",
         content = content,
       })
 
       -- Auto-save session
       if cfg.sessions and cfg.sessions.save_automatically then
-        session.auto_save()
+        require("wellm.session").auto_save()
       end
 
       callback(content)
@@ -173,7 +227,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   end
 
   -- Add user message to history before firing (so history stays consistent)
-  table.insert(state.data.history, { role = "user", content = user_text })
+  table.insert(require("wellm.state").data.history, { role = "user", content = user_text })
   attempt(messages, sys)
 end
 

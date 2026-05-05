@@ -205,10 +205,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       end
 
       -- Clean code-only responses
-      if mode == "replace" or mode == "insert" then
-        content = content:gsub("^```%w*\n", ""):gsub("\n?
-```$", "")
-      end
+    if mode == "replace" or mode == "insert" then
+      content = content
+        :gsub("^```%w*\n", "")
+        :gsub("\n-```$", "")
+    end
 
       -- Append to history
       -- (user message was already appended before calling; append assistant now)

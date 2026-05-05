@@ -8,14 +8,20 @@ function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", defaults, opts or {})
 
   -- Resolve API key
+  -- 1. If no hardcoded key is provided in setup({ api_key = "..." })
   if not M.config.api_key or M.config.api_key == "" then
-    M.config.api_key = os.getenv(M.config.api_key_name)
+      -- 2. Try to get it from the environment variable name
+      if M.config.api_key_name then
+          M.config.api_key = os.getenv(M.config.api_key_name)
+      end
   end
-  if not M.config.api_key then
-    vim.notify(
-      "[Wellm] API key not found. Set $" .. M.config.api_key_name,
-      vim.log.levels.WARN
-    )
+
+  -- 3. Final check: if we still don't have a key, notify the user
+  if not M.config.api_key or M.config.api_key == "" then
+      vim.notify(
+        "[Wellm] API key not found. Please provide 'api_key' in setup or set $" .. (M.config.api_key_name or "API_KEY"),
+        vim.log.levels.WARN
+      )
   end
 
   -- Auto-init .wellagent on first use if enabled

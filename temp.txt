@@ -1,0 +1,239 @@
+Yes, great idea — a floating spinner window gives you instant feedback without cluttering your workflow. Here's the component and integration.
+
+---
+
+## 1. New file: `wellm/ui/spinner.lua`
+
+```lua
+local M = {}
+
+local frames = { "|", "/", "-", "\\" }
+local interval = 150
+
+local buf = nil
+local win = nil
+local timer = nil
+local frame_idx = 1
+local status_text = ""
+
+local function create_window()
+  if win and vim.api.nvim_win_is_valid(win) then return end
+
+  buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+  vim.api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+
+  local label = " " .. frames[frame_idx] .. " " .. status_text .. " "
+  local width = math.max(#label + 2, 20)
+  local height = 1
+  local row = vim.o.lines - height - 4
+  local col = vim.o.columns - width - 2
+
+  win = vim.api.nvim_open_win(buf, false, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "single",
+    focusable = false,
+    zindex = 50,
+  })
+  vim.api.nvim_win_set_option(win, "winhl", "Normal:Comment,FloatBorder:Comment")
+end
+
+local function update()
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  local label = " " .. frames[frame_idx] .. " " .. status_text .. " "
+
+  -- resize if text length changed
+  local new_w = math.max(#label + 2, 20)
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.api.nvim_win_set_width(win, new_w)
+    vim.api.nvim_win_set_config(win, {
+      relative = "editor",
+      row = vim.o.lines - 5,
+      col = vim.o.columns - new_w - 2,
+    })
+  end
+
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { label })
+  frame_idx = (frame_idx % #frames) + 1
+end
+
+function M.start(msg)
+  if timer then M.stop() end
+  status_text = msg or "LLM thinking..."
+  frame_idx = 1
+  create_window()
+  update()
+  timer = vim.loop.new_timer()
+  timer:start(interval, interval, vim.schedule_wrap(update))
+end
+
+function M.stop(final_msg)
+  if timer then
+    timer:stop()
+    timer:close()
+    timer = nil
+  end
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.api.nvim_win_close(win, true)
+    win = nil
+  end
+  buf = nil
+  frame_idx = 1
+  if final_msg then
+    vim.notify(final_msg, vim.log.levels.INFO)
+  end
+end
+
+function M.is_active()
+  return timer ~= nil
+end
+
+-- update label mid-flight (e.g. "reading files...")
+function M.set_status(msg)
+  status_text = msg or status_text
+end
+
+return M
+```
+
+---
+
+## 2. Changes to `llm.lua`
+
+Add the require at the top, then wire `start`/`stop` into the two call sites.
+
+### Add require
+
+At the top of `llm.lua`, alongside the other requires:
+
+```lua
+local spinner = require("wellm.ui.spinner")
+```
+
+### In `M.call` — wrap the `attempt` call
+
+Find this line near the bottom of `M.call`:
+
+```lua
+  table.insert(require("wellm.state").data.history, { role = "user", content = user_text })
+  attempt(messages, sys)
+```
+
+Replace with:
+
+```lua
+  table.insert(require("wellm.state").data.history, { role = "user", content = user_text })
+  spinner.start("LLM thinking...")
+  attempt(messages, sys)
+```
+
+Then inside `attempt`, make sure `spinner.stop()` fires on every exit path. Find the callback inside `attempt` — you have three exit branches. Add `spinner.stop()` at the top of each:
+
+```lua
+    M.raw_call(msgs, s, function(content, used, err)
+      if err then
+        spinner.stop()
+        local ui_err = "> [!] API Error: " .. tostring(err)
+        vim.notify(ui_err, vim.log.levels.ERROR)
+        callback(ui_err)
+        return
+      end
+      if not content or content == "" then
+        spinner.stop()
+        local ui_err = "> [!] Empty response from AI."
+        vim.notify(ui_err, vim.log.levels.WARN)
+        callback(ui_err)
+        return
+      end
+
+      -- ... usage recording, READ loop, etc. stay the same ...
+
+      local reads = extract_reads(content)
+      if #reads > 0 and read_count < max_reads then
+        -- keep spinning, just update the label
+        spinner.set_status("reading files...")
+        local injected, missing = inject_read_files(reads)
+        read_count = read_count + injected
+
+        table.insert(msgs, { role = "assistant", content = content })
+        -- ... rest of READ loop logic unchanged ...
+        spinner.set_status("LLM thinking...")
+        attempt(msgs, new_sys)
+        return
+      end
+
+      -- ... code cleanup, history append, session save stay the same ...
+
+      spinner.stop()
+      callback(content)
+    end)
+```
+
+### In `M.orient`
+
+Find this section:
+
+```lua
+  vim.notify("[Wellm] Orienting project... (this may take a moment)", vim.log.levels.INFO)
+
+  raw_call(msgs, sys, function(content, used, err)
+    if err or not content or content == "" then
+      vim.notify("[Wellm] Orient failed: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+```
+
+Replace with:
+
+```lua
+  spinner.start("Orienting project...")
+
+  raw_call(msgs, sys, function(content, used, err)
+    if err or not content or content == "" then
+      spinner.stop()
+      vim.notify("[Wellm] Orient failed: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+```
+
+And at the end of that same callback, replace the final notify:
+
+```lua
+    spinner.stop("[Wellm] Project oriented. OVERVIEW.md + STRUCTURE.md written.")
+```
+
+(Remove the old `vim.notify` line since `spinner.stop` already notifies when given a message.)
+
+---
+
+## 3. Make sure the directory is in your runtimepath
+
+If `ui/` is a new directory under `wellm/`, just make sure Neovim can find it. If your plugin is loaded via `lazy.nvim` or similar, the whole `wellm/` tree is typically already on the runtimepath — no extra step needed. If you're manually requiring, just confirm the path resolves:
+
+```lua
+-- quick sanity check in :lua
+print(vim.api.nvim_get_runtime_file("wellm/ui/spinner.lua", false))
+```
+
+---
+
+## How it looks
+
+A small floating box appears at the bottom-right corner of the editor:
+
+```
+┌──────────────────────┐
+│ / LLM thinking...    │
+└──────────────────────┘
+```
+
+The `| / - \` character cycles every 150ms. When the READ loop kicks in, the label changes to `reading files...`, then back to `LLM thinking...`. On completion or error, the window closes immediately.
+
+---
+
+[DECISION] Added ui/spinner.lua floating progress window for LLM call feedback; wired into llm.call and llm.orient

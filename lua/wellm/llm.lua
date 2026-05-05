@@ -12,6 +12,7 @@ local context   = require("wellm.context")
 local wellagent = require("wellm.wellagent")
 local usage     = require("wellm.usage")
 local session   = require("wellm.session")
+local spinner   = require("wellm.ui.spinner")
 
 -- Payload builder 
 
@@ -162,12 +163,14 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   local function attempt(msgs, s)
     M.raw_call(msgs, s, function(content, used, err)
       if err then
+        spinner.stop()
         local ui_err = "> [!] API Error: " .. tostring(err)
         vim.notify(ui_err, vim.log.levels.ERROR)
         callback(ui_err)
         return
       end
       if not content or content == "" then
+        spinner.stop()
         local ui_err = "> [!] Empty response from AI."
         vim.notify(ui_err, vim.log.levels.WARN)
         callback(ui_err)
@@ -185,6 +188,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       -- Check if the model wants to read files
       local reads = extract_reads(content)
       if #reads > 0 and read_count < max_reads then
+        spinner.set_status("reading files...")
         local injected, missing = inject_read_files(reads)
         read_count = read_count + injected
 
@@ -200,6 +204,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
         -- Refresh system prompt (in case context updated) but keep the message history
         local _, new_sys = M.build_payload("", mode, nil)
+        spinner.set_status("LLM thinking...")
         attempt(msgs, new_sys)
         return
       end
@@ -213,16 +218,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       -- Append to history
       -- (user message was already appended before calling; append assistant now)
-      table.insert(require("wellm.state").data.history, {
-        role    = "assistant",
-        content = content,
-      })
+      table.insert(require("wellm.state").data.history, { role = "user", content = user_text })
+      spinner.start("LLM thinking...")
+      attempt(messages, sys)
 
       -- Auto-save session
       if cfg.sessions and cfg.sessions.save_automatically then
         require("wellm.session").auto_save()
       end
 
+      spinner.stop()
       callback(content)
     end)
   end
@@ -247,10 +252,11 @@ function M.orient(on_done)
   local msgs = {{ role = "user", content = prompt }}
   local sys  = "You produce concise, accurate developer documentation. Output only valid Markdown."
 
-  vim.notify("[Wellm] Orienting project... (this may take a moment)", vim.log.levels.INFO)
+  spinner.start("Orienting project...")
 
   raw_call(msgs, sys, function(content, used, err)
     if err or not content or content == "" then
+      spinner.stop()
       vim.notify("[Wellm] Orient failed: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
@@ -263,7 +269,7 @@ function M.orient(on_done)
     wellagent.write_context("OVERVIEW.md",  vim.trim(overview))
     wellagent.write_context("STRUCTURE.md", vim.trim(structure))
 
-    vim.notify("[Wellm] Project oriented. OVERVIEW.md + STRUCTURE.md written.")
+    spinner.stop("[Wellm] Project oriented. OVERVIEW.md + STRUCTURE.md written.")
     if on_done then on_done() end
   end)
 end

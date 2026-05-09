@@ -169,10 +169,17 @@ end
 
 -- Scan LLM response for [DECISION] markers and auto-log them
 function M.extract_decisions(response_text)
-  for line in response_text:gmatch("[^\n]+") do
-    local decision = line:match("^%[DECISION%]%s*(.+)$")
+  -- Strip code fences first
+  local text = response_text:gsub("```.-```", "")
+  for line in text:gmatch("[^\n]+") do
+    -- Must be the only thing on the line (with optional trailing whitespace)
+    local decision = line:match("^%s*%[DECISION:%s*(.+)%]%s*$")
+      or line:match("^%s*%[DECISION%]%s*(.+)%]%s*$")
     if decision then
-      M.log_decision(decision)
+      decision = vim.trim(decision)
+      if decision ~= "" and decision:len() > 5 then
+        M.log_decision("LLM", decision)
+      end
     end
   end
 end

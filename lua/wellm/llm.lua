@@ -60,33 +60,69 @@ end
 
 -- READ loop
 
+--- Valid path: starts with a letter, contains only path-safe chars,
+--- has at least one directory separator, and looks like a real file.
+local function looks_like_real_path(s)
+  s = vim.trim(s)
+  if s == "" then return false end
+  -- Must start with a letter or underscore (no regex chars, no dots, no angle brackets)
+  if not s:match("^[%a_]") then return false end
+  -- Must contain only path-safe characters
+  if s:match("[%^%$%(%)%%{%}%[%]%*%+%?<>|]") then return false end
+  -- Must have at least one path separator (reject bare filenames and single-segment placeholders)
+  -- unless it's a common dotfile like .gitignore
+  if not s:match("/") and not s:match("^%.%a") then return false end
+  -- Must have a file extension or be a directory with multiple segments
+  if not s:match("%.%a") and not s:match("/%a") then return false end
+  -- Reject obvious placeholders
+  local lower = s:lower()
+  for _, word in ipairs({ "example", "placeholder", "your", "path", "similar", "etc", "foo", "bar", "todo" }) do
+    if lower:match(word) then return false end
+  end
+  return true
+end
+
+--- Remove markdown code fences from text so tool-call markers
+--- inside examples/documentation are never extracted.
+local function strip_code_fences(text)
+  -- Remove fenced code blocks (``` ... ```)
+  return text:gsub("```.-```", "")
+end
+
 local function extract_reads(text)
   local reads = {}
-  for path in text:gmatch("%[READ: ([^%]]+)%]") do
-    -- Resolve relative to project root
-    local proj = wellagent.get_project_root()
-    local full  = (path:sub(1, 1) == "/") and path or (proj .. "/" .. path)
-    table.insert(reads, full)
+  local seen = {}
+  -- ONLY match lines where the marker starts at position 1
+  -- This prevents matches inside code blocks, prose, examples, etc.
+  for line in text:gmatch("[^\n]+") do
+    local trimmed = line:match("^%s*%[READ:%s*([^%]]+)%]%s*$")
+    if trimmed then
+      trimmed = vim.trim(trimmed)
+      if looks_like_real_path(trimmed) and not seen[trimmed] then
+        seen[trimmed] = true
+        local proj = wellagent.get_project_root()
+        local full = (trimmed:sub(1, 1) == "/") and trimmed or (proj .. "/" .. trimmed)
+        if vim.fn.filereadable(full) == 1 then
+          table.insert(reads, full)
+        else
+          vim.notify("[Wellm] File not found: " .. trimmed, vim.log.levels.WARN)
+        end
+      end
+    end
   end
   return reads
 end
 
 local function inject_read_files(reads)
   local injected = 0
-  local missing = {}
   for _, path in ipairs(reads) do
-    if vim.fn.filereadable(path) == 1 then
-      local ok, lines = pcall(vim.fn.readfile, path)
-      if ok then
-        context.inject_raw(path, table.concat(lines, "\n"))
-        injected = injected + 1
-      end
-    else
-      table.insert(missing, path)
-      vim.notify("[Wellm] LLM requested file not found: " .. path, vim.log.levels.WARN)
+    local ok, lines = pcall(vim.fn.readfile, path)
+    if ok then
+      context.inject_raw(path, table.concat(lines, "\n"))
+      injected = injected + 1
     end
   end
-  return injected, missing
+  return injected
 end
 
 -- Raw curl call
@@ -189,23 +225,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       wellagent.extract_decisions(content)
 
-      local reads = extract_reads(content)
+      local cleaned = strip_code_fences(content)
+      local reads = extract_reads(cleaned)
       if #reads > 0 and read_count < max_reads then
         spinner.set_status("reading files...")
-        local injected, missing = inject_read_files(reads)
+        local injected = inject_read_files(reads)
         read_count = read_count + injected
 
-        -- Append the model's "thinking" turn + user acknowledgement, then re-call
         table.insert(msgs, { role = "assistant", content = content })
+        table.insert(msgs, { role = "user", content = "Files loaded. Continue with your full answer." })
 
-        local feedback = "Files injected. Please continue with your full answer."
-        if #missing > 0 then
-          feedback = "Error: These files were not found: " .. table.concat(missing, ", ") .. ". Proceed with existing context."
-        end
-
-        table.insert(msgs, { role = "user", content = feedback })
-
-        -- Refresh system prompt (in case context updated) but keep the message history
         local _, new_sys = M.build_payload("", mode, nil)
         spinner.set_status("LLM thinking...")
         attempt(msgs, new_sys)

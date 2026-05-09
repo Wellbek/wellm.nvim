@@ -1,5 +1,5 @@
 -- wellm/ui/chat.lua
--- Persistent split-right chat window.
+-- Persistent split-right chat window with live streaming output.
 -- Layout:
 --   [history area]
 --   
@@ -82,40 +82,99 @@ local function clear_input(buf)
   vim.api.nvim_buf_set_lines(buf, lc - 1, lc, false, { INPUT_PFX })
 end
 
--- Submit 
+-- Streaming submit 
+-- 
+-- Strategy:
+--   1. Append the user turn + "## ASSISTANT\n\n" header to the buffer.
+--   2. Record `stream_start` (1-indexed) — the line where streaming text begins.
+--   3. on_delta: accumulate deltas; replace [stream_start .. end] with the
+--      split lines of the accumulated text.  This handles mid-token newlines
+--      correctly without ever shifting the header lines.
+--   4. on_reset (READ loop fired): clear the streamed region, show a brief
+--      "retrying…" placeholder, and reset the accumulator so the next stream
+--      starts clean at the same position.
+--   5. callback (done): call render_all for a canonical final render that
+--      includes proper separators, then re-focus the input line.
 
 local function submit(buf, win)
   local input = get_input(buf)
   if input == "" then return end
 
   clear_input(buf)
-  -- Append user turn immediately for visual feedback
-  buf_append(buf, {
+
+  -- Append the user turn and the assistant header synchronously so the user
+  -- gets immediate visual feedback before the first token arrives.
+  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  local lc = vim.api.nvim_buf_line_count(buf)
+  vim.api.nvim_buf_set_lines(buf, lc, -1, false, {
     "## YOU", "", input, "", SEPARATOR, "",
-    "## ASSISTANT", "", "  ⋯ thinking…", "", SEPARATOR, "",
-    SEPARATOR, INPUT_PFX,
+    "## ASSISTANT", "",
   })
+  vim.api.nvim_buf_set_option(buf, "modifiable", false)
   scroll_bottom(win, buf)
 
-  local llm = require("wellm.llm")
-  llm.call(input, "chat", function(response)
-    if not response or response == "" then
-      -- Instead of silence, show the error in the chat UI
-      buf_append(buf, { 
-        "## ASSISTANT", 
-        "", 
-        "> [!] Wellm Error: The API returned an empty response or failed to parse the prompt.", 
-        "", 
-        SEPARATOR, "" 
-      })
-    else
-      render_all(buf, win)
-    end
+  -- stream_start is the 1-indexed line where streamed text will be written.
+  -- Right now it's the empty line we just appended after "## ASSISTANT".
+  local stream_start  = vim.api.nvim_buf_line_count(buf)
+  local streamed_text = ""
+
+  --- Replace everything from stream_start to the current end of the buffer
+  --- with `text` (split on newlines).  Safe to call from any schedule context.
+  local function write_stream_region(text)
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    local new_lines = vim.split(text, "\n", { plain = true })
+    local cur_count = vim.api.nvim_buf_line_count(buf)
+    vim.api.nvim_buf_set_option(buf, "modifiable", true)
+    -- stream_start is 1-indexed; nvim_buf_set_lines uses 0-indexed start/end
+    vim.api.nvim_buf_set_lines(buf, stream_start - 1, cur_count, false, new_lines)
+    vim.api.nvim_buf_set_option(buf, "modifiable", false)
     scroll_bottom(win, buf)
+  end
+
+  --- Called by raw_stream for every text chunk.
+  local function on_delta(delta)
+    vim.schedule(function()
+      streamed_text = streamed_text .. delta
+      write_stream_region(streamed_text)
+    end)
+  end
+
+  --- Called when a READ loop fires: clear the streamed region and reset state
+  --- so the next streaming pass begins from the same position cleanly.
+  local function on_reset()
+    streamed_text = ""
+    write_stream_region("[loading files, retrying…]")
+    -- Keep stream_start at the same line; the next stream will overwrite it.
+  end
+
+  local llm = require("wellm.llm")
+  llm.call_stream(input, "chat", on_delta, on_reset, function(response)
+    vim.schedule(function()
+      if not response or response == "" then
+        -- Show an inline error without blowing up the buffer layout
+        write_stream_region("> [!] Error: the API returned an empty response.")
+        -- Append the input line so the user can keep chatting
+        if vim.api.nvim_buf_is_valid(buf) then
+          buf_append(buf, { "", SEPARATOR, INPUT_PFX })
+        end
+      else
+        -- Final canonical render (adds separators, resets input line, etc.)
+        render_all(buf, win)
+      end
+
+      scroll_bottom(win, buf)
+
+      -- Return focus to the input line in insert mode
+      if vim.api.nvim_win_is_valid(win) then
+        local final_lc = vim.api.nvim_buf_line_count(buf)
+        vim.api.nvim_win_set_cursor(win, { final_lc, #INPUT_PFX })
+        vim.cmd("startinsert!")
+      end
+    end)
   end)
 end
 
--- Open / focus 
+-- Open / focus
 
 function M.open()
   local state = require("wellm.state")
@@ -127,11 +186,10 @@ function M.open()
     return
   end
 
-  -- 2. Find or Create the Buffer
+  -- 2. Find or create the buffer
   local buf_name = "Wellm Chat"
-  local buf = -1
-  
-  -- Iterate through all buffers to see if "Wellm Chat" exists anywhere
+  local buf      = -1
+
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b):match(buf_name .. "$") then
       buf = b
@@ -139,12 +197,11 @@ function M.open()
     end
   end
 
-  -- If it doesn't exist, create it and name it
   if buf == -1 then
     buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, buf_name)
     vim.api.nvim_buf_set_option(buf, "filetype", "markdown")
-    vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
+    vim.api.nvim_buf_set_option(buf, "buftype",  "nofile")
     vim.api.nvim_buf_set_option(buf, "swapfile", false)
   end
 
@@ -158,9 +215,9 @@ function M.open()
     style = "minimal",
   })
 
-  vim.api.nvim_win_set_option(win, "wrap", true)
-  vim.api.nvim_win_set_option(win, "linebreak", true)
-  vim.api.nvim_win_set_option(win, "number", false)
+  vim.api.nvim_win_set_option(win, "wrap",       true)
+  vim.api.nvim_win_set_option(win, "linebreak",  true)
+  vim.api.nvim_win_set_option(win, "number",     false)
   vim.api.nvim_win_set_option(win, "signcolumn", "no")
 
   state.data.chat_win = win
@@ -241,6 +298,7 @@ end
 
 --- Re-render the chat window if it's open (called after loading a session).
 function M.refresh()
+  local state = require("wellm.state")
   if state.data.chat_buffer and vim.api.nvim_buf_is_valid(state.data.chat_buffer) then
     render_all(state.data.chat_buffer, state.data.chat_win)
   end

@@ -41,7 +41,7 @@ lua/wellm/
 
 ```lua
 {
-  "yourname/wellm.nvim",
+  "wellbek/wellm.nvim",
   config = function()
     require("wellm").setup({
       provider     = "anthropic",     -- or "zhipu"

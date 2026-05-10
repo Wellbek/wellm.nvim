@@ -44,7 +44,8 @@ local function append_before_input(buf, text)
   local new_lines  = vim.split(text, "\n", { plain = true })
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, new_lines)
-  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+  -- intentionally left modifiable, render_all already set it true and the
+  -- input line must remain editable
 end
 
 -- Render history 
@@ -184,18 +185,23 @@ local function submit(buf, win)
             local results = fileops.apply_changes(changes)
             append_before_input(buf, fileops.summarize(results))
             scroll_bottom(win, buf)
-          elseif mode == "filechanges_confirm" then
-            -- confirm() internally vim.schedules, so the dialog appears after
-            -- the current render pass completes.
-            fileops.confirm(changes, function(confirmed)
-              if confirmed then
-                local results = fileops.apply_changes(changes)
-                append_before_input(buf, fileops.summarize(results))
-              else
-                append_before_input(buf, "\nFile changes cancelled by user.")
-              end
-              scroll_bottom(win, buf)
-            end)
+            elseif mode == "filechanges_confirm" then
+              fileops.confirm(changes, function(confirmed)
+                if confirmed then
+                  local results = fileops.apply_changes(changes)
+                  append_before_input(buf, fileops.summarize(results))
+                else
+                  append_before_input(buf, "\nFile changes cancelled by user.")
+                end
+                scroll_bottom(win, buf)
+                -- re-focus input line after async dialog closes
+                if vim.api.nvim_win_is_valid(win) then
+                  local final_lc = vim.api.nvim_buf_line_count(buf)
+                  vim.api.nvim_win_set_cursor(win, { final_lc, #INPUT_PFX })
+                  vim.cmd("startinsert!")
+                end
+              end)
+            end
           end
         end
       end

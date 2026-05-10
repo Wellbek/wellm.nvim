@@ -31,6 +31,11 @@ read-loop that lets the LLM request files it needs before answering.
 - [File Picker](#file-picker)
 - [Session History](#session-history)
 - [Context Management](#context-management)
+- [Smart Context & Summarization](#smart-context--summarization)
+  - [Rolling Summary Memory](#rolling-summary-memory)
+  - [Chunk‑Based File Retrieval](#chunkbased-file-retrieval)
+  - [Knowledge Indexing](#knowledge-indexing)
+  - [Token Budget Guard](#token-budget-guard)
 - [LLM Auto File-Read](#llm-auto-file-read)
 - [File Operations](#file-operations)
 - [Project Orientation](#project-orientation)
@@ -80,6 +85,10 @@ read-loop that lets the LLM request files it needs before answering.
   reading files, etc.) in the corner of the editor.
 - **Fully async** - all API calls run through `vim.fn.jobstart`; the editor
   never freezes.
+- **Smart context & summarization** - rolling summary keeps long conversations
+  within token limits; chunk‑based file retrieval injects only relevant
+  fragments; knowledge index reduces `.wellagent` bloat; token budget guard
+  prevents API errors before sending the request.
 
 ---
 
@@ -168,6 +177,7 @@ require("wellm").setup({
     enabled          = true,
     auto_init        = true,   -- create .wellagent/ on first buffer open
     auto_orient      = true,   -- generate OVERVIEW + STRUCTURE if missing
+    max_entries_before_summarize = 8,   -- auto‑condense knowledge category
     ignored_patterns = {
       "%.git", "node_modules", "%.wellagent", "__pycache__",
       "%.pyc", "%.class", "dist", "build", "target", "%.cache",
@@ -176,8 +186,21 @@ require("wellm").setup({
 
   -- Session persistence
   sessions = {
-    save_automatically = true,  -- save after every LLM response
-    max_sessions       = 100,   -- trim oldest sessions beyond this
+    save_automatically = true,            -- save after every LLM response
+    max_sessions       = 100,             -- trim oldest sessions beyond this
+    summary_turns      = 3,               -- keep this many full turns + rolling summary
+  },
+
+  -- Context chunking and expiration
+  context = {
+    chunk_size    = 50,   -- lines per chunk
+    smart_top_k   = 3,    -- best chunks to inject when query given
+    item_ttl      = 1,    -- turns before auto‑expiration
+  },
+
+  -- Token budget protection
+  llm = {
+    output_reserve = 1024,  -- tokens reserved for model response
   },
 
   -- Prompt templates
@@ -358,6 +381,133 @@ pasting.
 
 Files are stored by absolute path and de-duplicated. Binary files, lock files,
 minified assets, and similar noise are automatically skipped.
+---
+## Smart Context & Summarization
+
+Long conversations and large file injections can quickly fill the model's
+context window, causing errors or degraded output. wellm.nvim implements four
+mechanisms to keep context usage small, predictable, and efficient.
+
+### Rolling Summary Memory
+
+Instead of sending the full conversation history every turn, the plugin
+maintains a compact **rolling summary**. After each assistant response, a cheap
+LLM call condenses the latest exchange into the existing summary.
+
+Let:
+
+- `S_t` = summary string after turn `t`
+- `U_t` = user message at turn `t`
+- `A_t` = assistant response at turn `t`
+- `f_sum(prompt, S_{t-1}, U_t, A_t)` be the summarizer LLM call
+
+Then:
+
+    S_t = f_sum("Update the summary", S_{t-1}, U_t, A_t)
+
+with an instruction to keep the output under ~300 tokens.
+
+When building the prompt for the main model at turn `t`, we send:
+
+    messages = [user: S_t, assistant: "Understood."] ∪ [last N full turns]
+
+where `N` is `sessions.summary_turns` (default 3). The full history is still
+available for explicit recall via `:WellmHistory`, but the runtime context per
+turn shrinks from `O(total history tokens)` to `O(summary + N × average turn)`.
+
+For a 20‑turn conversation (~15,000 tokens), this reduces token usage to
+~800 tokens (summary) + 3 × ~1,000 tokens (recent turns) = ~3,800 tokens - a
+**~75% reduction**.
+
+### Chunk‑Based File Retrieval
+
+Instead of inserting whole files, the plugin splits files into **chunks** of
+`context.chunk_size` lines (default 50). When a file is added **with a query**
+(e.g., `context.add_file_smart(path, user_input)`), it scores each chunk by
+keyword overlap with the query.
+
+Let:
+
+- `C_i` = chunk `i` (content string)
+- `F_i` = first line of `C_i` (function signature / heading)
+- `Q` = set of words in the user query
+
+The score for chunk `i` is:
+
+    score(i) = Σ_{w ∈ Q} 1 if w ∈ lowercase(F_i) else 0
+
+Only the top `smart_top_k` chunks (default 3) are injected into context. If no
+query is given, all chunks are added (fallback).
+
+**Example:** A 500‑line file (~2,000 tokens) -> 10 chunks of 50 lines.  
+With a query that matches 3 chunks -> `3 × 50 × ~4 tokens/line = ~600 tokens`.  
+**Reduction: ~70%**
+
+Chunks are cached with file mtime, and a TTL (`context.item_ttl`, default 1
+turn) automatically expires them after a few turns, preventing stale context
+from lingering.
+
+### Knowledge Indexing
+
+The `.wellagent/context/KNOWLEDGE.md` file (if used) is stored with category
+headings (`## Category: <name>`). When loading knowledge, the plugin does **not**
+read the whole file. Instead:
+
+1. **Indexing**: On each save, the entry is appended under its category and a
+   lightweight in‑memory map is kept:  
+   `category -> { entry_count, byte_offset, first_line }`
+
+2. **Relevance loading**: When a query is present, the plugin scans only the
+   first line of each entry and computes a keyword‑overlap score:
+
+        score(entry) = Σ_{w ∈ Q} 1 if w ∈ lowercase(first_line) else 0
+
+   It then returns at most 5 top‑scoring entries.  
+   Without a query, it returns only category headers and existing summaries.
+
+3. **Auto‑summarization**: If a category exceeds
+   `wellagent.max_entries_before_summarize` (default 8), the plugin calls the
+   LLM to condense older entries into a summary paragraph and replaces them,
+   keeping the file bounded.
+
+**Example:** A 30‑entry knowledge file (~3,000 tokens) -> index scan of 30 lines
+(~300 tokens) + 3 relevant entries (~500 tokens) = **~75% reduction**
+
+### Token Budget Guard
+
+Before every LLM call, wellm.nvim estimates the token count of the incoming
+request. The estimator uses a simple heuristic:
+
+    tokens(text) = ceil( UTF8_bytes(text) / 3.5 ) + 5 × (number_of_messages)
+
+The constant 3.5 approximates the empirical tokenisation rate of English
+code and prose (Claude uses ~3.5 characters per token, GPT uses ~4).
+
+Let:
+
+- `limit` = model's context window (hardcoded to 200000, covers all supported
+  models - Claude Sonnet 3.7, Claude Opus 4, GLM-4 all support >= 200k tokens)
+- `reserve` = `llm.output_reserve` (default 1024) tokens kept for the model's
+  response
+
+Then the pre‑flight check is:
+
+    if estimated_input_tokens + reserve > limit:
+        trim oldest message pair and retry (once)
+
+This prevents the request from ever being sent to the API when it would
+certainly be rejected, avoiding silent hangs or truncated responses.
+
+---
+
+## Token Savings Summary
+
+| Mechanism | Before | After | Reduction |
+|-----------|--------|-------|-----------|
+| Rolling summary (20‑turn chat) | ~15,000 tokens | ~3,800 tokens | **75%** |
+| Chunk‑based file (500 lines) | ~2,000 tokens | ~600 tokens | **70%** |
+| Knowledge index (30 entries) | ~3,000 tokens | ~800 tokens | **73%** |
+| **Combined effect** | ~20,000 tokens | ~5,200 tokens | **74%** |
 
 ---
 
@@ -484,6 +634,7 @@ root. This folder is created automatically when `wellagent.auto_init` is enabled
     OVERVIEW.md      - LLM-generated project summary
     STRUCTURE.md     - annotated file tree
     DECISIONS.md     - rolling decision log
+    KNOWLEDGE.md     - categorised, indexed knowledge entries
   sessions/
     2026-05-05T14-32-00.md    - conversation history as Markdown
     2026-05-06T09-15-00.md
@@ -512,9 +663,9 @@ lua/wellm/
   state.lua         - Single mutable state table (history, context, UI refs)
   llm.lua           - Core API call logic, READ loop, orient, streaming
   actions.lua       - User-facing actions: replace selection, insert at cursor
-  context.lua       - Add/remove/clear context files; build context block
-  wellagent.lua     - .wellagent/ folder management, tree generation, context assembly
-  session.lua       - Session save/load/list as Markdown files
+  context.lua       - Add/remove/clear context files; chunking; TTL expiration
+  wellagent.lua     - .wellagent/ folder management, tree generation, knowledge indexing
+  session.lua       - Session save/load/list; rolling summary memory
   usage.lua         - Token and cost tracking per model per month
   fileops.lua       - Parse, confirm, and apply <wellm_file> blocks
   providers/
@@ -536,18 +687,20 @@ lua/wellm/
 1. User triggers an action (keymap, command, or chat input).
 2. `llm.lua` assembles the payload:
    - System prompt (with `.wellagent` context prepended)
-   - Conversation history
-   - User message with any context files attached
-3. The request is sent via `vim.fn.jobstart` (curl) to the selected provider.
-4. Streaming responses are rendered token-by-token in the chat UI.
-5. If the LLM emits `[READ: path]` markers, the file is injected and the
+   - Rolling summary + recent N turns (from `session.lua`)
+   - User message with chunked context files
+3. Token budget guard estimates size; trims oldest turns if needed.
+4. The request is sent via `vim.fn.jobstart` (curl) to the selected provider.
+5. Streaming responses are rendered token-by-token in the chat UI.
+6. If the LLM emits `[READ: path]` markers, the file is injected and the
    request is retried automatically.
-6. If the LLM emits `<wellm_file>` blocks, they are parsed and applied
+7. If the LLM emits `<wellm_file>` blocks, they are parsed and applied
    according to the `filechanges` mode.
-7. If the LLM emits `[DECISION: ...]` markers, they are logged to
+8. If the LLM emits `[DECISION: ...]` markers, they are logged to
    `DECISIONS.md`.
-8. Token usage is recorded in `.wellagent/usage.json`.
-9. The session is auto-saved to `.wellagent/sessions/`.
+9. Token usage is recorded in `.wellagent/usage.json`.
+10. The session is auto-saved to `.wellagent/sessions/` and the rolling
+    summary is updated.
 
 ---
 

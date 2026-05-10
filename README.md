@@ -381,7 +381,9 @@ pasting.
 
 Files are stored by absolute path and de-duplicated. Binary files, lock files,
 minified assets, and similar noise are automatically skipped.
+
 ---
+
 ## Smart Context & Summarization
 
 Long conversations and large file injections can quickly fill the model's

@@ -155,7 +155,6 @@ local function submit(buf, win)
   --- Called when a READ loop fires: clear the streamed region and reset state
   --- so the next streaming pass begins from the same position cleanly.
   local function on_reset()
-    streamed_text = ""
     write_stream_region("[loading files, retrying…]")
     -- Keep stream_start at the same line; the next stream will overwrite it.
   end

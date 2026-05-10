@@ -35,6 +35,18 @@ local function scroll_bottom(win, buf)
   end
 end
 
+-- Insert lines before the trailing SEPARATOR + input line that render_all
+-- always places at the end, so file-ops summaries appear inside the
+-- conversation area rather than below the prompt.
+local function append_before_input(buf, text)
+  local lc         = vim.api.nvim_buf_line_count(buf)
+  local insert_at  = lc - 2   -- 0-indexed; last 2 lines are SEPARATOR + INPUT_PFX
+  local new_lines  = vim.split(text, "\n", { plain = true })
+  vim.api.nvim_buf_set_option(buf, "modifiable", true)
+  vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, new_lines)
+  vim.api.nvim_buf_set_option(buf, "modifiable", false)
+end
+
 -- Render history 
 
 local function render_all(buf, win)
@@ -160,6 +172,32 @@ local function submit(buf, win)
       else
         -- Final canonical render (adds separators, resets input line, etc.)
         render_all(buf, win)
+
+        -- Process any file operations the LLM emitted
+        local cfg     = require("wellm.init").config
+        local mode    = cfg.filechanges or "filechanges_confirm"
+        local fileops = require("wellm.fileops")
+        local changes = fileops.parse(response)
+
+        if #changes > 0 and mode ~= "filechanges_off" then
+          if mode == "filechanges_on" then
+            local results = fileops.apply_changes(changes)
+            append_before_input(buf, fileops.summarize(results))
+            scroll_bottom(win, buf)
+          elseif mode == "filechanges_confirm" then
+            -- confirm() internally vim.schedules, so the dialog appears after
+            -- the current render pass completes.
+            fileops.confirm(changes, function(confirmed)
+              if confirmed then
+                local results = fileops.apply_changes(changes)
+                append_before_input(buf, fileops.summarize(results))
+              else
+                append_before_input(buf, "\nFile changes cancelled by user.")
+              end
+              scroll_bottom(win, buf)
+            end)
+          end
+        end
       end
 
       scroll_bottom(win, buf)

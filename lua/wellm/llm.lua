@@ -27,6 +27,12 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     or (mode == "chat" and cfg.prompts.chat)
     or cfg.prompts.coding
 
+  -- Append file-editing instructions for chat mode when filechanges is active
+  local filechanges = cfg.filechanges or "filechanges_confirm"
+  if mode == "chat" and filechanges ~= "filechanges_off" and cfg.prompts.fileops then
+    sys = sys .. "\n\n" .. cfg.prompts.fileops
+  end
+
   -- Prepend .wellagent project context to system prompt
   local proj_ctx = wellagent.build_system_context()
   if proj_ctx then

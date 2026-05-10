@@ -77,4 +77,29 @@ function M.insert()
   end)
 end
 
+-- Cycle filechanges mode: off -> confirm -> on -> off
+
+function M.toggle_filechanges()
+  local cfg   = require("wellm.init").config
+  local modes = { "filechanges_off", "filechanges_confirm", "filechanges_on" }
+  local current = cfg.filechanges or "filechanges_confirm"
+
+  local next_mode
+  for i, mode in ipairs(modes) do
+    if mode == current then
+      next_mode = modes[(i % #modes) + 1]
+      break
+    end
+  end
+  next_mode = next_mode or "filechanges_confirm"
+  cfg.filechanges = next_mode
+
+  local display = {
+    filechanges_off     = "OFF (no modifications)",
+    filechanges_confirm = "CONFIRM (ask before applying)",
+    filechanges_on      = "ON (apply directly)",
+  }
+  vim.notify("[Wellm] File changes: " .. display[next_mode], vim.log.levels.INFO)
+end
+
 return M

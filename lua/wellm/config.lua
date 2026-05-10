@@ -39,6 +39,7 @@ M.defaults = {
   api_key      = nil,
   model        = "claude-sonnet-4-5",
   max_tokens   = 8192,
+  filechanges = "filechanges_confirm", -- "filechanges_off" | "filechanges_confirm" | "filechanges_on"
 
   wellagent = {
     enabled          = true,
@@ -98,6 +99,19 @@ M.defaults = {
   Skip lock files and generated directories.
 
   Output ONLY the two sections above, valid markdown, nothing else.]],
+
+  fileops = [[When you need to create or modify files, output each file using this exact format:
+
+<wellm_file path="relative/path/to/file.ext">
+complete file content here
+</wellm_file>
+
+Rules:
+- You may include multiple <wellm_file> blocks in your response.
+- Always provide the COMPLETE file content, not partial diffs.
+- Use relative paths from the project root.
+- File deletion is NOT supported — never attempt to delete files.
+- You can mix explanatory text with <wellm_file> blocks freely.]],
   },
 
   keys = {

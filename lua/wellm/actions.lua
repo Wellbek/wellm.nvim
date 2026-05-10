@@ -80,7 +80,7 @@ end
 -- Cycle filechanges mode: off -> confirm -> on -> off
 
 function M.toggle_filechanges()
-  local cfg   = require("wellm.init").config
+  local cfg   = require("wellm").config 
   local modes = { "filechanges_off", "filechanges_confirm", "filechanges_on" }
   local current = cfg.filechanges or "filechanges_confirm"
 

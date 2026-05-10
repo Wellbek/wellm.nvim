@@ -174,7 +174,7 @@ local function submit(buf, win)
         render_all(buf, win)
 
         -- Process any file operations the LLM emitted
-        local cfg     = require("wellm.init").config
+        local cfg     = require("wellm").config
         local mode    = cfg.filechanges or "filechanges_confirm"
         local fileops = require("wellm.fileops")
         local changes = fileops.parse(response)

@@ -184,4 +184,92 @@ function M.extract_decisions(response_text)
   end
 end
 
+-- Knowledge indexing (categorized markdown)
+function M.save_knowledge(text, category)
+  M.ensure_dirs()
+  category = category or "General"
+  local path = M.get_root() .. "/context/KNOWLEDGE.md"
+  local f = io.open(path, "a")
+  if f then
+    f:write(string.format("\n## Category: %s\n%s\n", category, text))
+    f:close()
+    -- Auto-summarize if category exceeds limit
+    local max = (require("wellm").config.wellagent and require("wellm").config.wellagent.max_entries_before_summarize) or 8
+    local entries = M.get_category_entries(category)
+    if #entries > max then
+      M.summarize_category(category, entries)
+    end
+  end
+end
+
+function M.get_category_entries(category)
+  local path = M.get_root() .. "/context/KNOWLEDGE.md"
+  if vim.fn.filereadable(path) == 0 then return {} end
+  local content = table.concat(vim.fn.readfile(path), "\n")
+  local entries = {}
+  local in_cat = false
+  for line in content:gmatch("[^\n]+") do
+    local cat_match = line:match("^## Category: (.+)")
+    if cat_match then
+      in_cat = (cat_match == category)
+    elseif in_cat and line:match("^%s*%-") then
+      table.insert(entries, line)
+    end
+  end
+  return entries
+end
+
+function M.summarize_category(category, entries)
+  if not entries or #entries <= 3 then return end
+  local llm = require("wellm.llm")
+  local prompt = string.format("Summarize these knowledge entries about '%s' into a single concise paragraph (max 200 tokens):\n%s", category, table.concat(entries, "\n"))
+  llm.raw_call({{role="user", content=prompt}}, "You are a summarizer.", function(summary, _, err)
+    if summary and not err then
+      -- Replace old entries with summary
+      local path = M.get_root() .. "/context/KNOWLEDGE.md"
+      local f = io.open(path, "r")
+      local old = f and f:read("*a") or ""
+      if f then f:close() end
+      local new_content = old:gsub("(## Category: " .. category .. "\n).-(\n## Category:|$)", "%1- **Summary:** " .. summary .. "\n%2")
+      local fw = io.open(path, "w")
+      if fw then fw:write(new_content); fw:close() end
+    end
+  end)
+end
+
+function M.load_knowledge_relevant(query)
+  local path = M.get_root() .. "/context/KNOWLEDGE.md"
+  if vim.fn.filereadable(path) == 0 then return "" end
+  local content = table.concat(vim.fn.readfile(path), "\n")
+  if not query or query == "" then
+    -- return only category headers and summaries
+    local lines = {}
+    for line in content:gmatch("[^\n]+") do
+      if line:match("^## Category:") or line:match("%- %*%*Summary:%*%*") then
+        table.insert(lines, line)
+      end
+    end
+    return table.concat(lines, "\n")
+  end
+  -- score paragraphs by query keywords
+  local scored = {}
+  for para in content:gmatch("[^\n]+") do
+    local score = 0
+    for word in query:gmatch("%w+") do
+      if para:lower():match(word:lower()) then
+        score = score + 1
+      end
+    end
+    if score > 0 then
+      table.insert(scored, {text=para, score=score})
+    end
+  end
+  table.sort(scored, function(a,b) return a.score > b.score end)
+  local top = {}
+  for i=1, math.min(5, #scored) do
+    table.insert(top, scored[i].text)
+  end
+  return table.concat(top, "\n")
+end
+
 return M

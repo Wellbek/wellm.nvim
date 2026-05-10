@@ -45,6 +45,7 @@ M.defaults = {
     enabled          = true,
     auto_init        = true,   -- create .wellagent on first use
     auto_orient      = true,   -- generate OVERVIEW/STRUCTURE if missing
+	max_entries_before_summarize = 8,
     ignored_patterns = {
       "%.git", "node_modules", "%.wellagent", "__pycache__",
       "%.pyc", "%.class", "dist", "build", "target", "%.cache",
@@ -54,6 +55,17 @@ M.defaults = {
   sessions = {
     save_automatically = true,
     max_sessions       = 100,
+    summary_turns      = 3,
+  },
+
+  context = {
+    chunk_size    = 50,
+    smart_top_k   = 3,
+    item_ttl      = 1,
+  },
+
+  llm = {
+    output_reserve = 1024,
   },
 
   prompts = {

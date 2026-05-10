@@ -15,6 +15,16 @@ local usage     = require("wellm.usage")
 local session   = require("wellm.session")
 local spinner   = require("wellm.ui.spinner")
 
+-- Token estimation heuristic
+function M.estimate_tokens(messages)
+  local total = 0
+  for _, msg in ipairs(messages) do
+    local len = (msg.content and #msg.content) or 0
+    total = total + math.ceil(len / 3.5) + 5 -- overhead per message
+  end
+  return total
+end
+
 -- Payload builder
 
 --- Build the messages array and system prompt for the API call.
@@ -194,6 +204,33 @@ function M.raw_stream(messages, sys, on_delta, on_done)
   local cfg      = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
 
+  -- Pre-flight token budget check
+--   local model_limits = {
+--     ["claude-sonnet-4-5"] = 200000,
+--     ["claude-sonnet-4-6"] = 200000,
+--     ["glm-4"] = 128000,
+--   }
+--   local limit = model_limits[cfg.model] or 200000
+  local limit = 200000
+  local reserve = cfg.llm and cfg.llm.output_reserve or 1024
+  local estimated = M.estimate_tokens(messages) + #sys/3.5
+  if estimated + reserve > limit then
+    -- Trim oldest messages or trigger summary
+    local session = require("wellm.session")
+    if #messages > 4 then
+      -- Remove oldest user/assistant pair
+      table.remove(messages, 1)
+      table.remove(messages, 1)
+      vim.notify("[Wellm] Trimming oldest messages to fit context limit.", vim.log.levels.WARN)
+      -- Recursive retry (simple, just call raw_stream again)
+      return M.raw_stream(messages, sys, on_delta, on_done)
+    elseif session.summary == "" then
+      vim.notify("[Wellm] Context limit reached – cannot proceed.", vim.log.levels.ERROR)
+      on_done(nil, nil, "Context too large for model limit")
+      return
+    end
+  end
+
   -- Graceful fallback for providers that don't support streaming yet
   if not provider.build_stream_request then
     M.raw_call(messages, sys, function(content, used, err)
@@ -289,7 +326,14 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     return
   end
 
+  local session_mod = require("wellm.session")
+  local pruned = session_mod.get_messages()
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
+  -- replace messages[1..#user part] with pruned + user part
+  for i = #messages-1, 1, -1 do table.remove(messages, i) end
+  for i, msg in ipairs(pruned) do
+    table.insert(messages, i, msg)
+  end
   local max_reads     = 3    -- prevent infinite loops
   local read_count    = 0
 

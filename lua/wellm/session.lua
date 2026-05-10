@@ -130,4 +130,52 @@ function M.auto_save()
   M.save(id, state.data.history)
 end
 
+--- Rolling summary memory
+M.summary = ""   -- condensed summary of past conversation
+
+--- Update the rolling summary using a cheap LLM call.
+--- This should be called after each assistant response.
+function M.update_summary(user_msg, assistant_msg)
+  local cfg = require("wellm").config
+  if not cfg or not cfg.model then return end
+  local llm = require("wellm.llm")
+  local prompt = string.format(
+    "You maintain a concise, information-dense running summary of a coding conversation. " ..
+    "Previous summary: %s\n\n" ..
+    "New exchange:\nUSER: %s\nASSISTANT: %s\n\n" ..
+    "Update the summary (max 300 tokens) to include key decisions, code added, and file context. " ..
+    "Do NOT repeat verbatim. Use plain language only.",
+    M.summary, user_msg, assistant_msg
+  )
+  llm.raw_call({{role="user", content=prompt}}, "You are a summarizer.", function(content, _, err)
+    if content and not err then
+      M.summary = content
+    end
+  end)
+end
+
+--- Build messages array for chat: system + rolling summary + last N turns.
+--- @param recent_turns number how many full turns to keep (default: cfg.session.summary_turns or 3)
+function M.get_messages(recent_turns)
+  local cfg = require("wellm").config
+  local n = recent_turns or (cfg.sessions and cfg.sessions.summary_turns) or 3
+  local full = state.data.history
+  local messages = {}
+  -- system prompt is added by llm.build_payload, not here
+  if M.summary and M.summary ~= "" then
+    table.insert(messages, { role = "user", content = "Conversation summary so far:\n" .. M.summary })
+    table.insert(messages, { role = "assistant", content = "Understood. I'll continue based on the summary and recent context." })
+  end
+  local start = math.max(1, #full - n*2 + 1)
+  for i = start, #full do
+    table.insert(messages, full[i])
+  end
+  return messages
+end
+
+--- Return the full unpruned history (for explicit recall commands).
+function M.get_full_messages()
+  return state.data.history
+end
+
 return M

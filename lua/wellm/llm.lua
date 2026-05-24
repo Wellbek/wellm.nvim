@@ -19,8 +19,7 @@ local spinner   = require("wellm.ui.spinner")
 function M.estimate_tokens(messages)
   local total = 0
   for _, msg in ipairs(messages) do
-    local len = (msg.content and #msg.content) or 0
-    total = total + math.ceil(len / 3.5) + 5 -- overhead per message
+    total = total + math.ceil((msg.content and #msg.content or 0) / 3.5) + 5
   end
   return total
 end
@@ -73,25 +72,15 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   return messages, sys
 end
 
--- READ loop
-
---- Valid path: starts with a letter, contains only path-safe chars,
---- has at least one directory separator, and looks like a real file.
+-- Valid path heuristic
 local function looks_like_real_path(s)
   s = vim.trim(s)
   if s == "" then return false end
-  -- Must start with a letter or underscore (no regex chars, no dots, no angle brackets)
-  if not s:match("^[%a_]") then return false end
-  -- Must contain only path-safe characters
+  if not s:match("^[%a_./]") then return false end
   if s:match("[%^%$%(%)%%{%}%[%]%*%+%?<>|]") then return false end
-  -- Must have at least one path separator (reject bare filenames and single-segment placeholders)
-  -- unless it's a common dotfile like .gitignore
-  if not s:match("/") and not s:match("^%.%a") then return false end
-  -- Must have a file extension or be a directory with multiple segments
-  if not s:match("%.%a") and not s:match("/%a") then return false end
-  -- Reject obvious placeholders
+  if not s:match("/") and not s:match("^%.") then return false end
   local lower = s:lower()
-  for _, word in ipairs({ "example", "placeholder", "your", "path", "similar", "etc", "foo", "bar", "todo" }) do
+  for _, word in ipairs({"example","placeholder","your","path","similar","etc","foo","bar","todo"}) do
     if lower:match(word) then return false end
   end
   return true
@@ -104,59 +93,51 @@ local function strip_code_fences(text)
   return text:gsub("```.-```", "")
 end
 
--- Extract [READ: path] markers and validate against cached project files
-local function extract_reads(text)
-  local reads = {}
-  local seen = {}
-  -- ONLY match lines where the marker starts at position 1
-  -- This prevents matches inside code blocks, prose, examples, etc.
-  for line in text:gmatch("[^\n]+") do
-    local trimmed = line:match("^%s*%[READ:%s*([^%]]+)%]%s*$")
-    if trimmed then
-      trimmed = vim.trim(trimmed)
-      if looks_like_real_path(trimmed) and not seen[trimmed] then
-        seen[trimmed] = true
-        -- Validate existence using project structure (cached)
-        if wellagent.path_exists_in_structure(trimmed) then
-          local proj = wellagent.get_project_root()
-          local full = (trimmed:sub(1, 1) == "/") and trimmed or (proj .. "/" .. trimmed)
-          if vim.fn.filereadable(full) == 1 then
-            table.insert(reads, full)
-          else
-            vim.notify("[Wellm] File in cache but not readable: " .. trimmed, vim.log.levels.WARN)
-          end
-        else
-          vim.notify("[Wellm] File not found in project: " .. trimmed, vim.log.levels.WARN)
-        end
+-- Extract multiple READ markers per line, return paths (relative)
+local function extract_read_paths(text)
+  local paths = {}
+  -- Match each [READ: path] individually. The pattern captures the part between
+  -- '[READ:' and the closing ']'. Works correctly even when multiple markers
+  -- appear on the same line because each ']' ends a match.
+  for path in text:gmatch("%[READ:%s*([^%]]+)%]") do
+    local trimmed = vim.trim(path)
+    if looks_like_real_path(trimmed) then
+      paths[#paths+1] = trimmed
+    end
+  end
+  return paths
+end
+
+-- Process reads: returns {success={path:full}, failure={rel_path}}
+local function process_reads(rel_paths)
+  local success = {}
+  local failure = {}
+  for _, rel in ipairs(rel_paths) do
+    local proj = wellagent.get_project_root()
+    local full = (rel:sub(1,1) == "/") and rel or (proj .. "/" .. rel)
+    if vim.fn.filereadable(full) == 1 then
+      local ok, lines = pcall(vim.fn.readfile, full)
+      if ok then
+        context.inject_raw(full, table.concat(lines, "\n"))
+        success[#success+1] = rel
+      else
+        failure[#failure+1] = rel
       end
+    else
+      failure[#failure+1] = rel
     end
   end
-  return reads
+  return success, failure
 end
 
-local function inject_read_files(reads)
-  local injected = 0
-  for _, path in ipairs(reads) do
-    local ok, lines = pcall(vim.fn.readfile, path)
-    if ok then
-      context.inject_raw(path, table.concat(lines, "\n"))
-      injected = injected + 1
-    end
-  end
-  return injected
-end
-
--- Raw curl call
-
---- Fire a single API call. On completion, calls cb(content, usage_data, err).
+-- Raw non-streaming call
 function M.raw_call(messages, sys, cb)
-  local cfg      = require("wellm").config
+  local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
-  local req      = provider.build_request(cfg, messages, sys)
+  local req = provider.build_request(cfg, messages, sys)
 
-  -- Write body to tempfile to avoid shell-escaping issues
   local tmp = os.tmpname()
-  local f   = io.open(tmp, "w")
+  local f = io.open(tmp, "w")
   if f then f:write(req.body); f:close() end
 
   local curl_cmd = { "curl", "-s", "-X", "POST", req.url }
@@ -178,9 +159,7 @@ function M.raw_call(messages, sys, cb)
     on_exit = function(_, code)
       os.remove(tmp)
       if code ~= 0 then
-        vim.schedule(function()
-          cb(nil, nil, "curl exited with code " .. code)
-        end)
+        vim.schedule(function() cb(nil, nil, "curl exit " .. code) end)
         return
       end
 
@@ -189,7 +168,7 @@ function M.raw_call(messages, sys, cb)
 
       vim.schedule(function()
         if not ok then
-          cb(nil, nil, "JSON decode failed: " .. raw:sub(1, 200))
+          cb(nil, nil, "JSON decode failed: " .. raw:sub(1,200))
           return
         end
         local content, used, err = provider.parse_response(decoded)
@@ -207,37 +186,9 @@ end
 ---
 --- Falls back to raw_call if the provider does not implement build_stream_request.
 function M.raw_stream(messages, sys, on_delta, on_done)
-  local cfg      = require("wellm").config
+  local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
 
-  -- Pre-flight token budget check
---   local model_limits = {
---     ["claude-sonnet-4-5"] = 200000,
---     ["claude-sonnet-4-6"] = 200000,
---     ["glm-4"] = 128000,
---   }
---   local limit = model_limits[cfg.model] or 200000
-  local limit = 200000
-  local reserve = cfg.llm and cfg.llm.output_reserve or 1024
-  local estimated = M.estimate_tokens(messages) + #sys/3.5
-  if estimated + reserve > limit then
-    -- Trim oldest messages or trigger summary
-    local session = require("wellm.session")
-    if #messages > 4 then
-      -- Remove oldest user/assistant pair
-      table.remove(messages, 1)
-      table.remove(messages, 1)
-      vim.notify("[Wellm] Trimming oldest messages to fit context limit.", vim.log.levels.WARN)
-      -- Recursive retry (simple, just call raw_stream again)
-      return M.raw_stream(messages, sys, on_delta, on_done)
-    elseif session.summary == "" then
-      vim.notify("[Wellm] Context limit reached – cannot proceed.", vim.log.levels.ERROR)
-      on_done(nil, nil, "Context too large for model limit")
-      return
-    end
-  end
-
-  -- Graceful fallback for providers that don't support streaming yet
   if not provider.build_stream_request then
     M.raw_call(messages, sys, function(content, used, err)
       if content and content ~= "" then
@@ -251,7 +202,7 @@ function M.raw_stream(messages, sys, on_delta, on_done)
   local req = provider.build_stream_request(cfg, messages, sys)
 
   local tmp = os.tmpname()
-  local f   = io.open(tmp, "w")
+  local f = io.open(tmp, "w")
   if f then f:write(req.body); f:close() end
 
   -- -N / --no-buffer disables curl's internal output buffering so chunks
@@ -262,9 +213,8 @@ function M.raw_stream(messages, sys, on_delta, on_done)
   table.insert(curl_cmd, "@" .. tmp)
 
   local full_content = ""
-  local usage_acc    = { input_tokens = 0, output_tokens = 0 }
-  -- Collect all raw lines so we can detect a non-SSE error response in on_exit
-  local raw_lines    = {}
+  local usage_acc = { input_tokens = 0, output_tokens = 0 }
+  local raw_lines = {}
 
   state.data.job_id = vim.fn.jobstart(curl_cmd, {
     -- stdout_buffered = false → on_stdout fires per-line as data arrives
@@ -282,12 +232,8 @@ function M.raw_stream(messages, sys, on_delta, on_done)
           end
 
           if used then
-            if used.input_tokens then
-              usage_acc.input_tokens = usage_acc.input_tokens + used.input_tokens
-            end
-            if used.output_tokens then
-              usage_acc.output_tokens = usage_acc.output_tokens + used.output_tokens
-            end
+            if used.input_tokens then usage_acc.input_tokens = usage_acc.input_tokens + used.input_tokens end
+            if used.output_tokens then usage_acc.output_tokens = usage_acc.output_tokens + used.output_tokens end
           end
         end
       end
@@ -296,7 +242,7 @@ function M.raw_stream(messages, sys, on_delta, on_done)
       os.remove(tmp)
       vim.schedule(function()
         if code ~= 0 then
-          on_done(nil, nil, "curl exited with code " .. code)
+          on_done(nil, nil, "curl exit " .. code)
           return
         end
 
@@ -306,7 +252,7 @@ function M.raw_stream(messages, sys, on_delta, on_done)
           local raw = table.concat(raw_lines, "")
           local ok, decoded = pcall(vim.fn.json_decode, raw)
           if ok and decoded.error then
-            on_done(nil, nil, decoded.error.message or "Unknown API error")
+            on_done(nil, nil, decoded.error.message or "API error")
             return
           end
         end
@@ -317,51 +263,33 @@ function M.raw_stream(messages, sys, on_delta, on_done)
   })
 end
 
--- Public buffered call (with READ loop)
-
---- Call the LLM for a given mode, with optional extra file context.
---- callback(response_text) is called on success.
---- Used by actions.lua (replace / insert) — no streaming needed there.
-function M.call(user_text, mode, callback, extra_file_ctx)
+-- Public streaming call with automatic READ handling and continuation
+function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
-
   if not cfg.api_key or cfg.api_key == "" then
-    local err_msg = "[Wellm] No API key configured."
-    vim.notify(err_msg, vim.log.levels.ERROR)
-    callback("> [!] " .. err_msg)
+    vim.notify("[Wellm] No API key", vim.log.levels.ERROR)
+    callback(nil)
     return
   end
 
-  local session_mod = require("wellm.session")
-  local pruned = session_mod.get_messages()
-  local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
-  -- replace messages[1..#user part] with pruned + user part
-  for i = #messages-1, 1, -1 do table.remove(messages, i) end
-  for i, msg in ipairs(pruned) do
-    table.insert(messages, i, msg)
-  end
-  local max_reads     = 3    -- prevent infinite loops
-  local read_count    = 0
+  wellagent.build_file_cache()
 
-  local function attempt(msgs, s)
-    M.raw_call(msgs, s, function(content, used, err)
-      -- Record usage regardless of error status 
-      if used then
-        usage.record(cfg.model, used.input_tokens, used.output_tokens)
-      end
+  local function start_conversation(initial_messages, initial_sys, read_round)
+    read_round = read_round or 0
+    local max_read_rounds = 3
 
+    M.raw_stream(initial_messages, initial_sys, on_delta, function(content, used, err)
+      if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
         spinner.stop()
-        local ui_err = "> [!] API Error: " .. tostring(err)
-        vim.notify(ui_err, vim.log.levels.ERROR)
-        callback(ui_err)
+        vim.notify("API Error: " .. tostring(err), vim.log.levels.ERROR)
+        callback(nil)
         return
       end
       if not content or content == "" then
         spinner.stop()
-        local ui_err = "> [!] Empty response from AI."
-        vim.notify(ui_err, vim.log.levels.WARN)
-        callback(ui_err)
+        vim.notify("Empty response", vim.log.levels.WARN)
+        callback(nil)
         return
       end
 
@@ -373,34 +301,41 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       wellagent.extract_decisions(content)
 
       local cleaned = strip_code_fences(content)
-      local reads = extract_reads(cleaned)
-      local injected = 0
-      if #reads > 0 and read_count < max_reads then
-        injected = inject_read_files(reads)
-        read_count = read_count + #reads  -- count attempts
+      local read_paths = extract_read_paths(cleaned)
 
-        if injected > 0 then
-          spinner.set_status("reading files...")
-          table.insert(msgs, { role = "assistant", content = content })
-          table.insert(msgs, { role = "user", content = "Files loaded. Continue with your full answer." })
+      if #read_paths > 0 and read_round < max_read_rounds then
+        -- Process the reads
+        spinner.set_status("reading files...")
+        local success, failure = process_reads(read_paths)
 
-          local _, new_sys = M.build_payload("", mode, nil)
-          spinner.set_status("LLM thinking...")
-          attempt(msgs, new_sys)
-          return
-        else
-          vim.notify("[Wellm] READ markers found but no files could be loaded. Proceeding with original response.", vim.log.levels.WARN)
+        -- Build feedback message for the LLM
+        local feedback_lines = {}
+        if #success > 0 then
+          feedback_lines[#feedback_lines+1] = "Successfully read: " .. table.concat(success, ", ")
         end
+        if #failure > 0 then
+          feedback_lines[#feedback_lines+1] = "Failed to read (file not found or unreadable): " .. table.concat(failure, ", ")
+        end
+        feedback_lines[#feedback_lines+1] = "Please continue with your answer. If some files were missing, provide guidance without them."
+
+        local feedback = table.concat(feedback_lines, "\n")
+
+        -- Do NOT save the intermediate READ-only response to history.
+        -- Instead, append the assistant's marker and the feedback as a new user turn.
+        local new_messages = vim.deepcopy(initial_messages)
+        -- Add a placeholder assistant message (won't be saved later)
+        table.insert(new_messages, { role = "assistant", content = "[Processing file reads]" })
+        table.insert(new_messages, { role = "user", content = feedback })
+
+        local _, new_sys = M.build_payload("", mode, nil)
+        spinner.set_status("LLM thinking...")
+        start_conversation(new_messages, new_sys, read_round + 1)
+        return
       end
 
-      -- Clean code-only responses
-      if mode == "replace" or mode == "insert" then
-        content = content
-          :gsub("^```%w*\n", "")
-          :gsub("\n```$", "")
-      end
-
-      table.insert(state.data.history, { role = "user",      content = user_text })
+      -- No reads, or max rounds reached: this is the final answer
+      -- Save the user message and this final assistant response
+      table.insert(state.data.history, { role = "user", content = user_text })
       table.insert(state.data.history, { role = "assistant", content = content })
 
       if cfg.sessions and cfg.sessions.save_automatically then
@@ -412,8 +347,9 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     end)
   end
 
+  local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
   spinner.start("LLM thinking...")
-  attempt(messages, sys)
+  start_conversation(messages, sys, 0)
 end
 
 -- Public streaming call (with READ loop)
@@ -427,61 +363,62 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
 
   if not cfg.api_key or cfg.api_key == "" then
-    local err_msg = "[Wellm] No API key configured."
-    vim.notify(err_msg, vim.log.levels.ERROR)
-    callback(nil)
+    vim.notify("[Wellm] No API key", vim.log.levels.ERROR)
+    callback("> [!] No API key")
     return
   end
 
-  local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
-  local max_reads     = 3
-  local read_count    = 0
+  wellagent.build_file_cache()
 
-  local function attempt(msgs, s)
-    M.raw_stream(msgs, s, on_delta, function(content, used, err)
-      if used then
-        usage.record(cfg.model, used.input_tokens, used.output_tokens)
-      end
+  local function attempt(msgs, s, read_round)
+    read_round = read_round or 0
+    local max_read_rounds = 3
 
+    M.raw_call(msgs, s, function(content, used, err)
+      if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
         spinner.stop()
-        vim.notify("> [!] API Error: " .. tostring(err), vim.log.levels.ERROR)
-        callback(nil)
+        callback("> [!] API Error: " .. tostring(err))
         return
       end
       if not content or content == "" then
         spinner.stop()
-        vim.notify("[Wellm] Empty streaming response.", vim.log.levels.WARN)
-        callback(nil)
+        callback("> [!] Empty response")
         return
       end
 
       wellagent.extract_decisions(content)
 
       local cleaned = strip_code_fences(content)
-      local reads   = extract_reads(cleaned)
-      local injected = 0
-      if #reads > 0 and read_count < max_reads then
-        spinner.set_status("reading files...")
-        injected = inject_read_files(reads)
-        read_count = read_count + #reads
+      local read_paths = extract_read_paths(cleaned)
 
-        if injected > 0 then
-          table.insert(msgs, { role = "assistant", content = content })
-          table.insert(msgs, { role = "user", content = "Files loaded. Continue with your full answer." })
-          local _, new_sys = M.build_payload("", mode, nil)
-          spinner.set_status("LLM thinking...")
-          attempt(msgs, new_sys)
-          return
-        else
-          vim.notify("[Wellm] READ markers found but no files could be loaded. Using response as-is.", vim.log.levels.WARN)
-          -- Fall through to save and return the original response
+      if #read_paths > 0 and read_round < max_read_rounds then
+        local success, failure = process_reads(read_paths)
+        local feedback_lines = {}
+        if #success > 0 then
+          feedback_lines[#feedback_lines+1] = "Successfully read: " .. table.concat(success, ", ")
         end
+        if #failure > 0 then
+          feedback_lines[#feedback_lines+1] = "Failed to read: " .. table.concat(failure, ", ")
+        end
+        feedback_lines[#feedback_lines+1] = "Continue with your answer."
+        local feedback = table.concat(feedback_lines, "\n")
+
+        local new_messages = vim.deepcopy(msgs)
+        table.insert(new_messages, { role = "assistant", content = "[Processing reads]" })
+        table.insert(new_messages, { role = "user", content = feedback })
+
+        local _, new_sys = M.build_payload("", mode, nil)
+        attempt(new_messages, new_sys, read_round + 1)
+        return
       end
 
-      table.insert(state.data.history, { role = "user",      content = user_text })
-      table.insert(state.data.history, { role = "assistant", content = content })
+      if mode == "replace" or mode == "insert" then
+        content = content:gsub("^```%w*\n", ""):gsub("\n```$", "")
+      end
 
+      table.insert(state.data.history, { role = "user", content = user_text })
+      table.insert(state.data.history, { role = "assistant", content = content })
       if cfg.sessions and cfg.sessions.save_automatically then
         session.auto_save()
       end
@@ -491,33 +428,27 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     end)
   end
 
+  local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
   spinner.start("LLM thinking...")
-  attempt(messages, sys)
+  attempt(messages, sys, 0)
 end
 
--- Orient call
-
---- One-shot call to generate OVERVIEW.md + STRUCTURE.md for a project.
+-- Orient command
 function M.orient(on_done)
-  local cfg        = require("wellm").config
-  local proj_root  = wellagent.get_project_root()
-  local ignored    = cfg.wellagent and cfg.wellagent.ignored_patterns or {}
-  local tree       = wellagent.generate_tree(proj_root, ignored)
-
-  local prompt = cfg.prompts.orient
-    .. "\n\n## File Tree\n```\n" .. proj_root .. "\n" .. tree .. "\n```"
-
+  local cfg = require("wellm").config
+  local proj_root = wellagent.get_project_root()
+  local ignored = cfg.wellagent and cfg.wellagent.ignored_patterns or {}
+  local tree = wellagent.generate_tree(proj_root, ignored)
+  local prompt = cfg.prompts.orient .. "\n\n## File Tree\n```\n" .. proj_root .. "\n" .. tree .. "\n```"
   local msgs = {{ role = "user", content = prompt }}
-  local sys  = "You produce concise, accurate developer documentation. Output only valid Markdown."
+  local sys = "You produce concise, accurate developer documentation. Output only valid Markdown."
 
-  spinner.start("Orienting project...")
-
+  spinner.start("Orienting...")
   M.raw_call(msgs, sys, function(content, used, err)
     if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
-
-    if err or not content or content == "" then
+    if err or not content then
       spinner.stop()
-      vim.notify("[Wellm] Orient failed: " .. tostring(err), vim.log.levels.ERROR)
+      vim.notify("Orient failed: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
     if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
@@ -531,8 +462,7 @@ function M.orient(on_done)
 
     -- Refresh the cached file structure after orient
     wellagent.refresh_structure()
-
-    spinner.stop("[Wellm] Project oriented. OVERVIEW.md + STRUCTURE.md written.")
+    spinner.stop("Project oriented.")
     if on_done then on_done() end
   end)
 end

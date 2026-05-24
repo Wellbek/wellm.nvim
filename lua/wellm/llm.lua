@@ -263,7 +263,7 @@ function M.raw_stream(messages, sys, on_delta, on_done)
   })
 end
 
--- Public streaming call with automatic READ handling and continuation
+-- Public streaming call with READ handling (no user-visible intermediate messages)
 function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -274,11 +274,18 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
   wellagent.build_file_cache()
 
+  -- Accumulate the full assistant response across potential multiple rounds
+  local full_assistant_response = ""
+  local function acc_delta(delta)
+    full_assistant_response = full_assistant_response .. delta
+    on_delta(delta)
+  end
+
   local function start_conversation(initial_messages, initial_sys, read_round)
     read_round = read_round or 0
-    local max_read_rounds = 3
+    local max_read_rounds = 5
 
-    M.raw_stream(initial_messages, initial_sys, on_delta, function(content, used, err)
+    M.raw_stream(initial_messages, initial_sys, acc_delta, function(content, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
         spinner.stop()
@@ -304,59 +311,49 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       local read_paths = extract_read_paths(cleaned)
 
       if #read_paths > 0 and read_round < max_read_rounds then
-        -- Save the intermediate assistant response (with READ markers) to history
-        table.insert(state.data.history, { role = "assistant", content = content })
-
         -- Process the reads
         spinner.set_status("reading files...")
         local success, failure = process_reads(read_paths)
 
-        -- Build feedback message for the LLM
-        local feedback_lines = {}
+        -- Build a follow-up user message that will NOT be displayed
+        local follow_up = {}
         if #success > 0 then
-          feedback_lines[#feedback_lines+1] = "Successfully read: " .. table.concat(success, ", ")
+          follow_up[#follow_up+1] = "Loaded: " .. table.concat(success, ", ")
         end
         if #failure > 0 then
-          feedback_lines[#feedback_lines+1] = "Failed to read (file not found or unreadable): " .. table.concat(failure, ", ")
+          follow_up[#follow_up+1] = "Failed: " .. table.concat(failure, ", ")
         end
-        feedback_lines[#feedback_lines+1] = "Please continue with your answer. If some files were missing, provide guidance without them."
+        follow_up[#follow_up+1] = "Continue your answer. Do not request more files."
 
-        local feedback = table.concat(feedback_lines, "\n")
+        -- Create a new conversation state that includes the assistant's partial response
+        -- and an invisible user message (not saved to history) that tells the LLM to continue.
+        -- We build new_messages from the original initial_messages plus the partial assistant response
+        -- and the follow-up user message.
+        local new_messages = vim.deepcopy(initial_messages)
+        -- The assistant's partial response (with READ markers) is added as an assistant message
+        table.insert(new_messages, { role = "assistant", content = full_assistant_response })
+        -- Add the invisible user message (this will not be shown to the user because we never save it to state.data.history)
+        table.insert(new_messages, { role = "user", content = table.concat(follow_up, "\n") })
 
-        -- Save the feedback user message to history
-        table.insert(state.data.history, { role = "user", content = feedback })
-
-        -- Build new messages for the API call (includes previous turns from history)
-        local new_messages = {}
-        for _, msg in ipairs(state.data.history) do
-          table.insert(new_messages, { role = msg.role, content = msg.content })
-        end
-
-        local _, new_sys = M.build_payload("", mode, nil)
         spinner.set_status("LLM thinking...")
-        start_conversation(new_messages, new_sys, read_round + 1)
+        start_conversation(new_messages, initial_sys, read_round + 1)
         return
       end
 
-      -- No reads, or max rounds reached: this is the final answer
-      -- Save the user message and this final assistant response
-      -- But ensure we don't duplicate the user message if it's already in history?
-      -- The original user message was already added to history by the caller? No, it's not.
-      -- In call_stream, the user message is not yet in history. So we add it now.
-      -- However, if we came through a READ round, the user message is already in history.
-      -- To avoid duplication, check if the last user message matches user_text.
+      -- No more reads: final answer. Save the entire accumulated response to history.
+      -- Avoid duplicating user message
       local last_msg = state.data.history[#state.data.history]
       if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
         table.insert(state.data.history, { role = "user", content = user_text })
       end
-      table.insert(state.data.history, { role = "assistant", content = content })
+      table.insert(state.data.history, { role = "assistant", content = full_assistant_response })
 
       if cfg.sessions and cfg.sessions.save_automatically then
         session.auto_save()
       end
 
       spinner.stop()
-      callback(content)
+      callback(full_assistant_response)
     end)
   end
 
@@ -365,7 +362,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   start_conversation(messages, sys, 0)
 end
 
--- Buffered call
+-- Buffered call (non‑streaming) with same logic
 function M.call(user_text, mode, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -375,6 +372,8 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   end
 
   wellagent.build_file_cache()
+
+  local full_response = ""
 
   local function attempt(msgs, s, read_round)
     read_round = read_round or 0
@@ -393,56 +392,40 @@ function M.call(user_text, mode, callback, extra_file_ctx)
         return
       end
 
+      full_response = full_response .. content
       wellagent.extract_decisions(content)
 
       local cleaned = strip_code_fences(content)
       local read_paths = extract_read_paths(cleaned)
 
       if #read_paths > 0 and read_round < max_read_rounds then
-        -- Save the intermediate assistant response (with READ markers) to history
-        table.insert(state.data.history, { role = "assistant", content = content })
-
         local success, failure = process_reads(read_paths)
-        local feedback_lines = {}
-        if #success > 0 then
-          feedback_lines[#feedback_lines+1] = "Successfully read: " .. table.concat(success, ", ")
-        end
-        if #failure > 0 then
-          feedback_lines[#feedback_lines+1] = "Failed to read: " .. table.concat(failure, ", ")
-        end
-        feedback_lines[#feedback_lines+1] = "Continue with your answer."
-        local feedback = table.concat(feedback_lines, "\n")
+        local follow_up = {}
+        if #success > 0 then follow_up[#follow_up+1] = "Loaded: " .. table.concat(success, ", ") end
+        if #failure > 0 then follow_up[#follow_up+1] = "Failed: " .. table.concat(failure, ", ") end
+        follow_up[#follow_up+1] = "Continue."
 
-        -- Save the feedback user message to history
-        table.insert(state.data.history, { role = "user", content = feedback })
+        local new_messages = vim.deepcopy(msgs)
+        table.insert(new_messages, { role = "assistant", content = full_response })
+        table.insert(new_messages, { role = "user", content = table.concat(follow_up, "\n") })
 
-        -- Build new messages from updated history
-        local new_messages = {}
-        for _, msg in ipairs(state.data.history) do
-          table.insert(new_messages, { role = msg.role, content = msg.content })
-        end
-
-        local _, new_sys = M.build_payload("", mode, nil)
-        attempt(new_messages, new_sys, read_round + 1)
+        attempt(new_messages, s, read_round + 1)
         return
       end
 
       if mode == "replace" or mode == "insert" then
-        content = content:gsub("^```%w*\n", ""):gsub("\n```$", "")
+        full_response = full_response:gsub("^```%w*\n", ""):gsub("\n```$", "")
       end
 
-      -- Avoid duplicate user message
       local last_msg = state.data.history[#state.data.history]
       if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
         table.insert(state.data.history, { role = "user", content = user_text })
       end
-      table.insert(state.data.history, { role = "assistant", content = content })
-      if cfg.sessions and cfg.sessions.save_automatically then
-        session.auto_save()
-      end
+      table.insert(state.data.history, { role = "assistant", content = full_response })
+      if cfg.sessions and cfg.sessions.save_automatically then session.auto_save() end
 
       spinner.stop()
-      callback(content)
+      callback(full_response)
     end)
   end
 
@@ -469,10 +452,7 @@ function M.orient(on_done)
       vim.notify("Orient failed: " .. tostring(err), vim.log.levels.ERROR)
       return
     end
-    if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
-
-    -- Split OVERVIEW / STRUCTURE sections
-    local overview  = content:match("## OVERVIEW\n(.-)\n## STRUCTURE") or content
+    local overview = content:match("## OVERVIEW\n(.-)\n## STRUCTURE") or content
     local structure = content:match("## STRUCTURE\n(.+)$") or tree
 
     wellagent.write_context("OVERVIEW.md",  vim.trim(overview))

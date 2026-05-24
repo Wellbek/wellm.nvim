@@ -151,6 +151,7 @@ local function submit(buf, win)
   vim.api.nvim_buf_set_lines(buf, lc, -1, false, header_lines)
   vim.api.nvim_buf_set_option(buf, "modifiable", false)
   scroll_bottom(win, buf)
+  vim.cmd('redraw')
 
   -- stream_start is the 1-indexed line where streamed text will be written.
   -- Right now it's the empty line we just appended after "## ASSISTANT".
@@ -168,14 +169,15 @@ local function submit(buf, win)
     vim.api.nvim_buf_set_lines(buf, stream_start - 1, cur_count, false, new_lines)
     vim.api.nvim_buf_set_option(buf, "modifiable", false)
     scroll_bottom(win, buf)
+    vim.cmd('redraw')  -- Force immediate screen update so streaming is visible
   end
 
   --- Called by raw_stream for every text chunk.
+  --- No vim.schedule here: on_delta is already invoked from a vim.schedule
+  --- context inside raw_stream, so we can update the buffer directly.
   local function on_delta(delta)
-    vim.schedule(function()
-      streamed_text = streamed_text .. delta
-      write_stream_region(streamed_text)
-    end)
+    streamed_text = streamed_text .. delta
+    write_stream_region(streamed_text)
   end
 
   --- Called when a READ loop fires: clear the streamed region and reset state
@@ -219,6 +221,7 @@ local function submit(buf, win)
                 append_before_input(buf, "\nFile changes cancelled by user.")
               end
               scroll_bottom(win, buf)
+              vim.cmd('redraw')
               -- re-focus input line after async dialog closes
               if vim.api.nvim_win_is_valid(win) then
                 local final_lc = vim.api.nvim_buf_line_count(buf)
@@ -231,6 +234,7 @@ local function submit(buf, win)
       end
 
       scroll_bottom(win, buf)
+      vim.cmd('redraw')
 
       -- Return focus to the input line in insert mode
       if vim.api.nvim_win_is_valid(win) then

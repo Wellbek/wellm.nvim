@@ -104,7 +104,7 @@ local function strip_code_fences(text)
   return text:gsub("```.-```", "")
 end
 
--- Extract [READ: path] markers and validate against project structure
+-- Extract [READ: path] markers and validate against cached project files
 local function extract_reads(text)
   local reads = {}
   local seen = {}
@@ -123,10 +123,10 @@ local function extract_reads(text)
           if vim.fn.filereadable(full) == 1 then
             table.insert(reads, full)
           else
-            vim.notify("[Wellm] File in structure but not readable: " .. trimmed, vim.log.levels.WARN)
+            vim.notify("[Wellm] File in cache but not readable: " .. trimmed, vim.log.levels.WARN)
           end
         else
-          vim.notify("[Wellm] Skipping non-existent file: " .. trimmed, vim.log.levels.WARN)
+          vim.notify("[Wellm] File not found in project: " .. trimmed, vim.log.levels.WARN)
         end
       end
     end
@@ -389,7 +389,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
           attempt(msgs, new_sys)
           return
         else
-          vim.notify("[Wellm] READ markers found but no valid files could be loaded. Proceeding without retry.", vim.log.levels.WARN)
+          vim.notify("[Wellm] READ markers found but no files could be loaded. Proceeding with original response.", vim.log.levels.WARN)
         end
       end
 
@@ -474,7 +474,8 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           attempt(msgs, new_sys)
           return
         else
-          vim.notify("[Wellm] READ markers found but no valid files could be loaded. Proceeding without retry.", vim.log.levels.WARN)
+          vim.notify("[Wellm] READ markers found but no files could be loaded. Using response as-is.", vim.log.levels.WARN)
+          -- Fall through to save and return the original response
         end
       end
 

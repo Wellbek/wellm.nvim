@@ -178,7 +178,7 @@ function M.extract_decisions(response_text)
     if decision then
       decision = vim.trim(decision)
       if decision ~= "" and decision:len() > 5 then
-        M.log_decision("LLM", decision)
+        M.log_decision(decision)
       end
     end
   end
@@ -272,73 +272,72 @@ function M.load_knowledge_relevant(query)
   return table.concat(top, "\n")
 end
 
--- Project structure scanning and file existence validation
+-- File existence cache
 
--- Cached set of file paths (relative to project root) from last scan
-M._cached_files = nil
+M._file_cache = nil
+M._cache_timestamp = nil
 
---- Returns a set (table with keys) of all file paths (relative to project root)
---- that exist according to the last scan. If structure doesn't exist, returns nil.
-function M.get_existing_files()
-  local structure = M.read_context("STRUCTURE.md")
-  if not structure then return nil end
-
+--- Build a cache of all file paths in the project (recursive scan)
+function M.build_file_cache()
+  local proj_root = M.get_project_root()
+  local cfg = require("wellm").config
+  local ignored_patterns = cfg.wellagent and cfg.wellagent.ignored_patterns or {}
+  
   local files = {}
-  -- STRUCTURE.md format:
-  -- ## File Tree
-  -- ```
-  -- project/
-  -- ├── file1.lua
-  -- ├── dir/
-  -- │   └── file2.lua
-  -- ```
-  -- We parse lines that look like file entries (no trailing slash, has extension or dotfile)
-  for line in structure:gmatch("[^\n]+") do
-    -- Remove tree drawing characters
-    local cleaned = line:gsub("[│├└─ ]", "")
-    if cleaned ~= "" and not cleaned:match("/$") then
-      -- File if it has an extension or is a dotfile
-      if cleaned:match("%.") or cleaned:match("^%.") then
-        files[cleaned] = true
+  
+  local function should_skip(name)
+    for _, pat in ipairs(ignored_patterns) do
+      if name:match(pat) then return true end
+    end
+    -- Always skip common directories
+    local skip_dirs = { "^%.git$", "^node_modules$", "^%.wellagent$", "__pycache__", "%.cache" }
+    for _, pat in ipairs(skip_dirs) do
+      if name:match(pat) then return true end
+    end
+    return false
+  end
+  
+  local function scan_dir(dir, prefix)
+    prefix = prefix or ""
+    local handle = vim.loop.fs_scandir(dir)
+    if not handle then return end
+    
+    while true do
+      local name, ftype = vim.loop.fs_scandir_next(handle)
+      if not name then break end
+      
+      if not should_skip(name) then
+        local rel_path = prefix .. name
+        
+        if ftype == "file" then
+          files[rel_path] = true
+        elseif ftype == "directory" then
+          scan_dir(dir .. "/" .. name, rel_path .. "/")
+        end
       end
     end
   end
+  
+  vim.notify("[Wellm] Scanning project files...", vim.log.levels.INFO)
+  scan_dir(proj_root, "")
+  M._file_cache = files
+  M._cache_timestamp = os.time()
+  vim.notify(string.format("[Wellm] Found %d files", vim.tbl_count(files)), vim.log.levels.INFO)
   return files
 end
 
---- Perform a fresh scan of the project root and write STRUCTURE.md.
---- Returns the set of file paths.
-function M.scan_and_update_structure()
-  local cfg = require("wellm").config
-  local proj_root = M.get_project_root()
-  local ignored = cfg.wellagent and cfg.wellagent.ignored_patterns or {}
-  local tree = M.generate_tree(proj_root, ignored, 0, "")
-  local structure_content = "## File Tree\n```\n" .. proj_root .. "\n" .. tree .. "\n```"
-  M.write_context("STRUCTURE.md", structure_content)
-  local files = M.get_existing_files()
-  M._cached_files = files
-  return files
-end
-
---- Check if a path exists according to the cached structure.
---- If structure is missing, triggers a scan (non-blocking; but for sync use, we force once).
---- Returns boolean.
+--- Check if a path exists in the project (using cached scan)
 function M.path_exists_in_structure(rel_path)
-  if M._cached_files == nil then
-    M._cached_files = M.get_existing_files()
-    if M._cached_files == nil then
-      -- No structure yet – do a full scan (this may be called during a READ loop)
-      vim.notify("[Wellm] Scanning project structure for file validation...", vim.log.levels.INFO)
-      M._cached_files = M.scan_and_update_structure()
-    end
+  if not M._file_cache then
+    M.build_file_cache()
   end
-  return M._cached_files and M._cached_files[rel_path] == true
+  return M._file_cache and M._file_cache[rel_path] == true
 end
 
---- Force refresh of the cached structure (e.g., after orient or manual command).
+--- Force refresh of the cached file list
 function M.refresh_structure()
-  M._cached_files = M.scan_and_update_structure()
-  vim.notify("[Wellm] Project structure refreshed.", vim.log.levels.INFO)
+  M._file_cache = nil
+  M.build_file_cache()
 end
 
 return M

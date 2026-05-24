@@ -304,6 +304,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       local read_paths = extract_read_paths(cleaned)
 
       if #read_paths > 0 and read_round < max_read_rounds then
+        -- Save the intermediate assistant response (with READ markers) to history
+        table.insert(state.data.history, { role = "assistant", content = content })
+
         -- Process the reads
         spinner.set_status("reading files...")
         local success, failure = process_reads(read_paths)
@@ -320,12 +323,14 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
         local feedback = table.concat(feedback_lines, "\n")
 
-        -- Do NOT save the intermediate READ-only response to history.
-        -- Instead, append the assistant's marker and the feedback as a new user turn.
-        local new_messages = vim.deepcopy(initial_messages)
-        -- Add a placeholder assistant message (won't be saved later)
-        table.insert(new_messages, { role = "assistant", content = "[Processing file reads]" })
-        table.insert(new_messages, { role = "user", content = feedback })
+        -- Save the feedback user message to history
+        table.insert(state.data.history, { role = "user", content = feedback })
+
+        -- Build new messages for the API call (includes previous turns from history)
+        local new_messages = {}
+        for _, msg in ipairs(state.data.history) do
+          table.insert(new_messages, { role = msg.role, content = msg.content })
+        end
 
         local _, new_sys = M.build_payload("", mode, nil)
         spinner.set_status("LLM thinking...")
@@ -335,7 +340,15 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
       -- No reads, or max rounds reached: this is the final answer
       -- Save the user message and this final assistant response
-      table.insert(state.data.history, { role = "user", content = user_text })
+      -- But ensure we don't duplicate the user message if it's already in history?
+      -- The original user message was already added to history by the caller? No, it's not.
+      -- In call_stream, the user message is not yet in history. So we add it now.
+      -- However, if we came through a READ round, the user message is already in history.
+      -- To avoid duplication, check if the last user message matches user_text.
+      local last_msg = state.data.history[#state.data.history]
+      if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
+        table.insert(state.data.history, { role = "user", content = user_text })
+      end
       table.insert(state.data.history, { role = "assistant", content = content })
 
       if cfg.sessions and cfg.sessions.save_automatically then
@@ -352,16 +365,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   start_conversation(messages, sys, 0)
 end
 
--- Public streaming call (with READ loop)
-
---- Streaming variant of M.call. Used by the chat UI.
----
----   on_delta(text)   — called for each streamed chunk of the FINAL response
----   callback(text)   — called once with the complete response when done
----                      (nil on error)
-function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
+-- Buffered call
+function M.call(user_text, mode, callback, extra_file_ctx)
   local cfg = require("wellm").config
-
   if not cfg.api_key or cfg.api_key == "" then
     vim.notify("[Wellm] No API key", vim.log.levels.ERROR)
     callback("> [!] No API key")
@@ -393,6 +399,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       local read_paths = extract_read_paths(cleaned)
 
       if #read_paths > 0 and read_round < max_read_rounds then
+        -- Save the intermediate assistant response (with READ markers) to history
+        table.insert(state.data.history, { role = "assistant", content = content })
+
         local success, failure = process_reads(read_paths)
         local feedback_lines = {}
         if #success > 0 then
@@ -404,9 +413,14 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         feedback_lines[#feedback_lines+1] = "Continue with your answer."
         local feedback = table.concat(feedback_lines, "\n")
 
-        local new_messages = vim.deepcopy(msgs)
-        table.insert(new_messages, { role = "assistant", content = "[Processing reads]" })
-        table.insert(new_messages, { role = "user", content = feedback })
+        -- Save the feedback user message to history
+        table.insert(state.data.history, { role = "user", content = feedback })
+
+        -- Build new messages from updated history
+        local new_messages = {}
+        for _, msg in ipairs(state.data.history) do
+          table.insert(new_messages, { role = msg.role, content = msg.content })
+        end
 
         local _, new_sys = M.build_payload("", mode, nil)
         attempt(new_messages, new_sys, read_round + 1)
@@ -417,7 +431,11 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         content = content:gsub("^```%w*\n", ""):gsub("\n```$", "")
       end
 
-      table.insert(state.data.history, { role = "user", content = user_text })
+      -- Avoid duplicate user message
+      local last_msg = state.data.history[#state.data.history]
+      if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
+        table.insert(state.data.history, { role = "user", content = user_text })
+      end
       table.insert(state.data.history, { role = "assistant", content = content })
       if cfg.sessions and cfg.sessions.save_automatically then
         session.auto_save()

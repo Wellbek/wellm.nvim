@@ -55,11 +55,11 @@ local function render_all(buf, win)
   local lines = {}
 
   -- Header
-  table.insert(lines, " Wellm Chat  q=close  <CR>=send  <C-c>=cancel  <leader>ch=history")
+  table.insert(lines, " Wellm Chat  q=close  <CR>=send  <C-c>=cancel  <C-j>=newline  <leader>ch=history")
   table.insert(lines, SEPARATOR)
   table.insert(lines, "")
 
-  for _, msg in ipairs(state.data.history) do
+  for _, msg in ipairs(state.history) do
     local role_label = (msg.role == "user") and "## YOU" or "## ASSISTANT"
     table.insert(lines, role_label)
     table.insert(lines, "")
@@ -83,16 +83,39 @@ end
 
 -- Input extraction 
 
+--- Find the 1-indexed line number of the last SEPARATOR line in the buffer.
+--- Everything below it is the user input area.
+local function find_input_start(buf)
+  local lc = vim.api.nvim_buf_line_count(buf)
+  for i = lc, 1, -1 do
+    local line = vim.api.nvim_buf_get_lines(buf, i - 1, i, false)[1] or ""
+    if line == SEPARATOR then
+      return i + 1  -- 1-indexed: first line of input area
+    end
+  end
+  return lc  -- fallback: just the last line
+end
+
 local function get_input(buf)
-  local lc    = vim.api.nvim_buf_line_count(buf)
-  local line  = vim.api.nvim_buf_get_lines(buf, lc - 1, lc, false)[1] or ""
-  return vim.trim(line:gsub("^" .. vim.pesc(INPUT_PFX), ""))
+  local lc         = vim.api.nvim_buf_line_count(buf)
+  local start_line = find_input_start(buf)
+  local lines      = vim.api.nvim_buf_get_lines(buf, start_line - 1, lc, false)
+
+  if #lines == 0 then return "" end
+
+  -- Strip INPUT_PFX prefix from the first line
+  lines[1] = lines[1]:gsub("^" .. vim.pesc(INPUT_PFX), "")
+
+  -- Join all lines and trim leading/trailing whitespace
+  return vim.trim(table.concat(lines, "\n"))
 end
 
 local function clear_input(buf)
-  local lc = vim.api.nvim_buf_line_count(buf)
+  local lc         = vim.api.nvim_buf_line_count(buf)
+  local start_line = find_input_start(buf)
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
-  vim.api.nvim_buf_set_lines(buf, lc - 1, lc, false, { INPUT_PFX })
+  -- Replace everything from the first input line to end with just INPUT_PFX
+  vim.api.nvim_buf_set_lines(buf, start_line - 1, lc, false, { INPUT_PFX })
 end
 
 -- Streaming submit 
@@ -119,10 +142,13 @@ local function submit(buf, win)
   -- gets immediate visual feedback before the first token arrives.
   vim.api.nvim_buf_set_option(buf, "modifiable", true)
   local lc = vim.api.nvim_buf_line_count(buf)
-  vim.api.nvim_buf_set_lines(buf, lc, -1, false, {
-    "## YOU", "", input, "", SEPARATOR, "",
-    "## ASSISTANT", "",
-  })
+  local user_lines = vim.split(input, "\n", { plain = true })
+  local header_lines = { "## YOU", "" }
+  for _, l in ipairs(user_lines) do
+    table.insert(header_lines, l)
+  end
+  vim.list_extend(header_lines, { "", SEPARATOR, "", "## ASSISTANT", "" })
+  vim.api.nvim_buf_set_lines(buf, lc, -1, false, header_lines)
   vim.api.nvim_buf_set_option(buf, "modifiable", false)
   scroll_bottom(win, buf)
 
@@ -281,6 +307,23 @@ function M.open()
       vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true
     )
     vim.schedule(function() submit(buf, win) end)
+  end)
+
+  -- Insert a newline in the input area without submitting
+  imap("<C-j>", function()
+    vim.api.nvim_feedkeys(
+      vim.api.nvim_replace_termcodes("<CR>", true, false, true), "n", true
+    )
+  end)
+  map("<C-j>", function()
+    local lc = vim.api.nvim_buf_line_count(buf)
+    vim.api.nvim_win_set_cursor(win, { lc, 0 })
+    vim.cmd("startinsert!")
+    vim.schedule(function()
+      vim.api.nvim_feedkeys(
+        vim.api.nvim_replace_termcodes("<CR>", true, false, true), "n", true
+      )
+    end)
   end)
 
   -- Close

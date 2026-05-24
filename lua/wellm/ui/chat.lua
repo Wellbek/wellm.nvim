@@ -126,10 +126,7 @@ end
 --   3. on_delta: accumulate deltas; replace [stream_start .. end] with the
 --      split lines of the accumulated text.  This handles mid-token newlines
 --      correctly without ever shifting the header lines.
---   4. on_reset (READ loop fired): clear the streamed region, show a brief
---      "retrying…" placeholder, and reset the accumulator so the next stream
---      starts clean at the same position.
---   5. callback (done): call render_all for a canonical final render that
+--   4. callback (done): call render_all for a canonical final render that
 --      includes proper separators, then re-focus the input line.
 
 local function submit(buf, win)
@@ -180,15 +177,8 @@ local function submit(buf, win)
     write_stream_region(streamed_text)
   end
 
-  --- Called when a READ loop fires: clear the streamed region and reset state
-  --- so the next streaming pass begins from the same position cleanly.
-  local function on_reset()
-    write_stream_region("[loading files, retrying…]")
-    -- Keep stream_start at the same line; the next stream will overwrite it.
-  end
-
   local llm = require("wellm.llm")
-  llm.call_stream(input, "chat", on_delta, on_reset, function(response)
+  llm.call_stream(input, "chat", on_delta, function(response)
     vim.schedule(function()
       if not response or response == "" then
         -- Show an inline error without blowing up the buffer layout

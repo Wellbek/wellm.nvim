@@ -104,6 +104,7 @@ local function strip_code_fences(text)
   return text:gsub("```.-```", "")
 end
 
+-- Extract [READ: path] markers and validate against project structure
 local function extract_reads(text)
   local reads = {}
   local seen = {}
@@ -115,12 +116,17 @@ local function extract_reads(text)
       trimmed = vim.trim(trimmed)
       if looks_like_real_path(trimmed) and not seen[trimmed] then
         seen[trimmed] = true
-        local proj = wellagent.get_project_root()
-        local full = (trimmed:sub(1, 1) == "/") and trimmed or (proj .. "/" .. trimmed)
-        if vim.fn.filereadable(full) == 1 then
-          table.insert(reads, full)
+        -- Validate existence using project structure (cached)
+        if wellagent.path_exists_in_structure(trimmed) then
+          local proj = wellagent.get_project_root()
+          local full = (trimmed:sub(1, 1) == "/") and trimmed or (proj .. "/" .. trimmed)
+          if vim.fn.filereadable(full) == 1 then
+            table.insert(reads, full)
+          else
+            vim.notify("[Wellm] File in structure but not readable: " .. trimmed, vim.log.levels.WARN)
+          end
         else
-          vim.notify("[Wellm] File not found: " .. trimmed, vim.log.levels.WARN)
+          vim.notify("[Wellm] Skipping non-existent file: " .. trimmed, vim.log.levels.WARN)
         end
       end
     end
@@ -368,18 +374,23 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       local cleaned = strip_code_fences(content)
       local reads = extract_reads(cleaned)
+      local injected = 0
       if #reads > 0 and read_count < max_reads then
-        spinner.set_status("reading files...")
-        local injected = inject_read_files(reads)
-        read_count = read_count + injected
+        injected = inject_read_files(reads)
+        read_count = read_count + #reads  -- count attempts
 
-        table.insert(msgs, { role = "assistant", content = content })
-        table.insert(msgs, { role = "user", content = "Files loaded. Continue with your full answer." })
+        if injected > 0 then
+          spinner.set_status("reading files...")
+          table.insert(msgs, { role = "assistant", content = content })
+          table.insert(msgs, { role = "user", content = "Files loaded. Continue with your full answer." })
 
-        local _, new_sys = M.build_payload("", mode, nil)
-        spinner.set_status("LLM thinking...")
-        attempt(msgs, new_sys)
-        return
+          local _, new_sys = M.build_payload("", mode, nil)
+          spinner.set_status("LLM thinking...")
+          attempt(msgs, new_sys)
+          return
+        else
+          vim.notify("[Wellm] READ markers found but no valid files could be loaded. Proceeding without retry.", vim.log.levels.WARN)
+        end
       end
 
       -- Clean code-only responses
@@ -410,12 +421,9 @@ end
 --- Streaming variant of M.call. Used by the chat UI.
 ---
 ---   on_delta(text)   — called for each streamed chunk of the FINAL response
----   on_reset()       — called when a READ loop fires so the UI can clear the
----                      in-progress text and show "retrying…" before the next
----                      stream begins
 ---   callback(text)   — called once with the complete response when done
 ---                      (nil on error)
-function M.call_stream(user_text, mode, on_delta, on_reset, callback, extra_file_ctx)
+function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
 
   if not cfg.api_key or cfg.api_key == "" then
@@ -452,21 +460,22 @@ function M.call_stream(user_text, mode, on_delta, on_reset, callback, extra_file
 
       local cleaned = strip_code_fences(content)
       local reads   = extract_reads(cleaned)
+      local injected = 0
       if #reads > 0 and read_count < max_reads then
-        -- Signal the UI to clear the streamed area and show "retrying…"
-        vim.schedule(on_reset)
-
         spinner.set_status("reading files...")
-        local injected = inject_read_files(reads)
-        read_count = read_count + injected
+        injected = inject_read_files(reads)
+        read_count = read_count + #reads
 
-        table.insert(msgs, { role = "assistant", content = content })
-        table.insert(msgs, { role = "user",      content = "Files loaded. Continue with your full answer." })
-
-        local _, new_sys = M.build_payload("", mode, nil)
-        spinner.set_status("LLM thinking...")
-        attempt(msgs, new_sys)
-        return
+        if injected > 0 then
+          table.insert(msgs, { role = "assistant", content = content })
+          table.insert(msgs, { role = "user", content = "Files loaded. Continue with your full answer." })
+          local _, new_sys = M.build_payload("", mode, nil)
+          spinner.set_status("LLM thinking...")
+          attempt(msgs, new_sys)
+          return
+        else
+          vim.notify("[Wellm] READ markers found but no valid files could be loaded. Proceeding without retry.", vim.log.levels.WARN)
+        end
       end
 
       table.insert(state.data.history, { role = "user",      content = user_text })
@@ -518,6 +527,9 @@ function M.orient(on_done)
 
     wellagent.write_context("OVERVIEW.md",  vim.trim(overview))
     wellagent.write_context("STRUCTURE.md", vim.trim(structure))
+
+    -- Refresh the cached file structure after orient
+    wellagent.refresh_structure()
 
     spinner.stop("[Wellm] Project oriented. OVERVIEW.md + STRUCTURE.md written.")
     if on_done then on_done() end

@@ -59,7 +59,7 @@ local function render_all(buf, win)
   table.insert(lines, SEPARATOR)
   table.insert(lines, "")
 
-  for _, msg in ipairs(state.history) do
+  for _, msg in ipairs(state.data.history) do
     local role_label = (msg.role == "user") and "## YOU" or "## ASSISTANT"
     table.insert(lines, role_label)
     table.insert(lines, "")

@@ -192,33 +192,71 @@ local function submit(buf, win)
         render_all(buf, win)
 
         -- Process any file operations the LLM emitted
-        local cfg     = require("wellm").config
-        local mode    = cfg.filechanges or "filechanges_confirm"
-        local fileops = require("wellm.fileops")
-        local changes = fileops.parse(response)
+        local cfg          = require("wellm").config
+        local mode         = cfg.filechanges or "filechanges_confirm"
+        local editor       = require("wellm.editor")
+        local wellagent    = require("wellm.wellagent")
+        local project_root = wellagent.get_project_root()
 
-        if #changes > 0 and mode ~= "filechanges_off" then
-          if mode == "filechanges_on" then
-            local results = fileops.apply_changes(changes)
-            append_before_input(buf, fileops.summarize(results))
-            scroll_bottom(win, buf)
-          elseif mode == "filechanges_confirm" then
-            fileops.confirm(changes, function(confirmed)
-              if confirmed then
-                local results = fileops.apply_changes(changes)
-                append_before_input(buf, fileops.summarize(results))
-              else
-                append_before_input(buf, "\nFile changes cancelled by user.")
+        local edits = editor.parse_edits(response)
+        if #edits > 0 and mode ~= "filechanges_off" then
+          -- Group and validate
+          local grouped, order = editor.group_edits_by_path(edits)
+          local pending = {}
+          local valid = true
+          for _, path in ipairs(order) do
+            local ok, err, sorted = editor.validate_edits(path, grouped[path], project_root)
+            if not ok then
+              append_before_input(buf, "Validation error: " .. err)
+              valid = false
+              break
+            end
+            table.insert(pending, { path = path, sorted = sorted })
+          end
+
+          if valid then
+            local function apply_pending()
+              local results = {}
+              for _, p in ipairs(pending) do
+                local ok, err = editor.apply_edits_to_file(p.path, p.sorted, project_root)
+                table.insert(results, { path = p.path, ok = ok, error = err })
               end
-              scroll_bottom(win, buf)
-              vim.cmd('redraw')
-              -- re-focus input line after async dialog closes
-              if vim.api.nvim_win_is_valid(win) then
-                local final_lc = vim.api.nvim_buf_line_count(buf)
-                vim.api.nvim_win_set_cursor(win, { final_lc, #INPUT_PFX })
-                vim.cmd("startinsert!")
+              local summary_lines = {}
+              for _, r in ipairs(results) do
+                if r.ok then
+                  table.insert(summary_lines, "  + " .. r.path)
+                else
+                  table.insert(summary_lines, "  x " .. r.path .. ": " .. (r.error or "unknown"))
+                end
               end
-            end)
+              append_before_input(buf, "\nFile changes:\n" .. table.concat(summary_lines, "\n"))
+              vim.cmd.checktime()
+            end
+
+            if mode == "filechanges_on" then
+              apply_pending()
+            elseif mode == "filechanges_confirm" then
+              local msg = "Wellm: Apply file edits?\n"
+              for _, p in ipairs(pending) do
+                msg = msg .. "  " .. p.path .. " (" .. #p.sorted .. " edit(s))\n"
+              end
+              vim.schedule(function()
+                local choice = vim.fn.confirm(msg, "&Yes\n&No", 1)
+                if choice == 1 then
+                  apply_pending()
+                else
+                  append_before_input(buf, "\nFile changes cancelled by user.")
+                end
+                scroll_bottom(win, buf)
+                vim.cmd('redraw')
+                if vim.api.nvim_win_is_valid(win) then
+                  local final_lc = vim.api.nvim_buf_line_count(buf)
+                  vim.api.nvim_win_set_cursor(win, { final_lc, #INPUT_PFX })
+                  vim.cmd("startinsert!")
+                end
+              end)
+              return  -- skip the later scroll & focus (done inside confirm)
+            end
           end
         end
       end

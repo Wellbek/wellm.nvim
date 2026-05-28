@@ -40,6 +40,7 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   local filechanges = cfg.filechanges or "filechanges_confirm"
   if mode == "chat" and filechanges ~= "filechanges_off" and cfg.prompts.fileops then
     sys = sys .. "\n\n" .. cfg.prompts.fileops
+    sys = sys .. "\n\nWhen editing existing files, use <wellm_edit> blocks with line ranges. For new files use start=\"1\" end=\"0\". Never output full existing files unless specifically asked to do so."
   end
 
   -- Prepend .wellagent project context to system prompt
@@ -61,7 +62,12 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   if ctx_block then table.insert(parts, ctx_block) end
 
   if extra_file_ctx then
-    table.insert(parts, "## Current File\n```\n" .. extra_file_ctx .. "\n```")
+    local lines = vim.split(extra_file_ctx, "\n")
+    local numbered = {}
+    for i, l in ipairs(lines) do
+      numbered[i] = string.format("%4d: %s", i, l)
+    end
+    table.insert(parts, "## Current File (with line numbers)\n```\n" .. table.concat(numbered, "\n") .. "\n```")
   end
 
   table.insert(messages, {

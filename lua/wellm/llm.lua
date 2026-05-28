@@ -118,19 +118,36 @@ end
 local function process_reads(rel_paths)
   local success = {}
   local failure = {}
+  local proj = wellagent.get_project_root()
+  local cwd = vim.fn.getcwd()
+
   for _, rel in ipairs(rel_paths) do
-    local proj = wellagent.get_project_root()
-    local full = (rel:sub(1,1) == "/") and rel or (proj .. "/" .. rel)
-    if vim.fn.filereadable(full) == 1 then
-      local ok, lines = pcall(vim.fn.readfile, full)
+    local found = nil
+    -- Try project root first
+    local candidate = (rel:sub(1,1) == "/") and rel or (proj .. "/" .. rel)
+    if vim.fn.filereadable(candidate) == 1 then
+      found = candidate
+    else
+      -- Fallback to current working directory
+      candidate = (rel:sub(1,1) == "/") and rel or (cwd .. "/" .. rel)
+      if vim.fn.filereadable(candidate) == 1 then
+        found = candidate
+      end
+    end
+
+    if found then
+      local ok, lines = pcall(vim.fn.readfile, found)
       if ok then
-        context.inject_raw(full, table.concat(lines, "\n"))
+        context.inject_raw(found, table.concat(lines, "\n"))
         success[#success+1] = rel
+        vim.notify("[Wellm] Loaded: " .. rel .. " from " .. found, vim.log.levels.INFO)
       else
         failure[#failure+1] = rel
+        vim.notify("[Wellm] Failed to read: " .. rel .. " (read error)", vim.log.levels.WARN)
       end
     else
       failure[#failure+1] = rel
+      vim.notify("[Wellm] File not found: " .. rel .. " (tried " .. proj .. " and " .. cwd .. ")", vim.log.levels.WARN)
     end
   end
   return success, failure

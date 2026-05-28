@@ -118,7 +118,12 @@ function M.validate_edits(path, file_edits, project_root)
   -- Sort descending by start_line for bottom-to-top application
   local sorted = {}
   for _, e in ipairs(file_edits) do
-    table.insert(sorted, vim.tbl_deep_copy(e))
+    table.insert(sorted, {
+      path = e.path,
+      start_line = e.start_line,
+      end_line = e.end_line,
+      content = e.content,
+    })
   end
   table.sort(sorted, function(a, b)
     return a.start_line > b.start_line

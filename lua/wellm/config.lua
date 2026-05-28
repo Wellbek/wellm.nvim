@@ -112,18 +112,19 @@ M.defaults = {
 
   Output ONLY the two sections above, valid markdown, nothing else.]],
 
-  fileops = [[When you need to create or modify files, output each file using this exact format:
+  fileops = [[When you need to modify an existing file, **do not output the whole file**. Use <wellm_edit> blocks with exact line ranges:
 
-<wellm_file path="relative/path/to/file.ext">
-complete file content here
-</wellm_file>
+<wellm_edit path="relative/path/to/file" start="10" end="15">
+replacement content for lines 10-15
+</wellm_edit>
 
-Rules:
-- You may include multiple <wellm_file> blocks in your response.
-- Always provide the COMPLETE file content, not partial diffs.
-- Use relative paths from the project root.
-- File deletion is NOT supported — never attempt to delete files.
-- You can mix explanatory text with <wellm_file> blocks freely.]],
+- Insert new lines: set start = end+1 (e.g. start="11" end="10")
+- Delete lines: provide empty content inside the block
+- Create a new file: use start="1" end="0" with the full file content
+
+You may include multiple <wellm_edit> blocks in your response. Edits are applied bottom-to-top so line numbers stay valid.
+
+If the user explicitly asks for the whole file, you may output it with <wellm_file> instead, but prefer <wellm_edit> for modifications. Never output the entire content of an existing file unless specifically requested.]],
   },
 
   keys = {

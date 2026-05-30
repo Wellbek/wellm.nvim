@@ -83,14 +83,15 @@ function M.parse_response(decoded)
       content = message.content or ""
       if message.tool_calls then
         for _, tc in ipairs(message.tool_calls) do
-          table.insert(tool_calls, {
+          local call = {
             id = tc.id,
             type = "function",
-            func = {                    -- renamed from "function"
-              name = tc.function.name,
-              arguments = tc.function.arguments, -- JSON string
-            }
-          })
+          }
+          call["func"] = {
+            name = tc.function.name,
+            arguments = tc.function.arguments,
+          }
+          table.insert(tool_calls, call)
         end
       end
     end

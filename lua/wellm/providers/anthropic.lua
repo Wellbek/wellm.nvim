@@ -48,7 +48,6 @@ function M.parse_stream_line(line)
   if dec.type == "content_block_start"
       and dec.content_block
       and dec.content_block.type == "tool_use" then
-    -- ignore streaming tool calls; rely on final response
     return nil, nil, nil, false
   end
 
@@ -78,14 +77,15 @@ function M.parse_response(decoded)
     if block.type == "text" then
       content = content .. block.text
     elseif block.type == "tool_use" then
-      table.insert(tool_calls, {
+      local call = {
         id = block.id,
         type = "function",
-        func = {               -- renamed from "function" to "func"
-          name = block.name,
-          arguments = block.input,
-        }
-      })
+      }
+      call["func"] = {
+        name = block.name,
+        arguments = block.input,
+      }
+      table.insert(tool_calls, call)
     end
   end
 

@@ -234,6 +234,13 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     local max_tool_rounds = 10
     local tool_defs = tools.get_tool_definitions(cfg.provider)
 
+    if tool_round > 0 then
+      vim.notify(
+        "[Wellm] Follow-up messages:\n" ..
+        vim.fn.json_encode(messages),
+        vim.log.levels.WARN
+      )
+    end
     M.raw_stream(messages, sys, acc_delta, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then

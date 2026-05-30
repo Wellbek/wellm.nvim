@@ -32,6 +32,11 @@ function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
   local body = vim.fn.json_decode(req.body)
   body.stream = true
   req.body    = vim.fn.json_encode(body)
+  local f = io.open("/tmp/zhipu_request.json", "w")
+  if f then
+    f:write(req.body)
+    f:close()
+  end
   return req
 end
 

@@ -15,7 +15,7 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
     body.tool_choice = "auto"
   end
 
-  vim.notify(vim.fn.json_encode(body))
+  --- vim.notify(vim.fn.json_encode(body))
 
   return {
     url = "https://open.bigmodel.cn/api/paas/v4/chat/completions",

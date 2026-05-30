@@ -8,13 +8,18 @@ Session.__index = Session
 
 local M = {}
 
-local state     = require("wellm.state")
-local wellagent = require("wellm.wellagent")
+local function get_state()
+  return require("wellm.state")
+end
+
+local function get_wellagent()
+  return require("wellm.wellagent")
+end
 
 -- Index helpers
 
 local function index_path()
-  return wellagent.get_root() .. "/index.json"
+  return get_wellagent().get_root() .. "/index.json"
 end
 
 function Session.new(opts)
@@ -40,7 +45,7 @@ local function load_index()
 end
 
 local function save_index(idx)
-  wellagent.ensure_dirs()
+  get_wellagent().ensure_dirs()
   local f = io.open(index_path(), "w")
   if f then
     f:write(vim.json.encode(idx))
@@ -101,8 +106,8 @@ end
 --- Save current history to a markdown file and update the index.
 function M.save(session_id, history, title)
   title = title or session_id
-  local path = wellagent.get_root() .. "/sessions/" .. session_id .. ".md"
-  wellagent.ensure_dirs()
+  local path = get_wellagent().get_root() .. "/sessions/" .. session_id .. ".md"
+  get_wellagent().ensure_dirs()
 
   local lines = {
     "# Session: " .. session_id,
@@ -143,7 +148,7 @@ end
 
 --- Load a session's history from its markdown file.
 function M.load(session_id)
-  local path = wellagent.get_root() .. "/sessions/" .. session_id .. ".md"
+  local path = get_wellagent().get_root() .. "/sessions/" .. session_id .. ".md"
   if vim.fn.filereadable(path) == 0 then return nil end
 
   local history      = {}
@@ -176,7 +181,7 @@ function M.load_sessions()
   local idx = load_index()
   local sessions = {}
   for _, entry in ipairs(idx) do
-    local path = wellagent.get_root() .. "/sessions/" .. entry.id .. ".json"
+    local path = get_wellagent().get_root() .. "/sessions/" .. entry.id .. ".json"
     if vim.fn.filereadable(path) == 1 then
       local ok, content = pcall(table.concat, vim.fn.readfile(path), "\n")
       if ok then
@@ -195,12 +200,12 @@ function M.list()
   return load_index()
 end
 
---- Auto-save current state.data.history (called after each LLM response).
+--- Auto-save current get_state().data.history (called after each LLM response).
 function M.auto_save()
-  if #state.data.history == 0 then return end
-  local id = state.data.current_session_id or M.new_id()
-  state.data.current_session_id = id
-  M.save(id, state.data.history)
+  if #get_state().data.history == 0 then return end
+  local id = get_state().data.current_session_id or M.new_id()
+  get_state().data.current_session_id = id
+  M.save(id, get_state().data.history)
 end
 
 --- Rolling summary memory
@@ -231,7 +236,7 @@ end
 function M.get_messages(recent_turns)
   local cfg = require("wellm").config
   local n = recent_turns or (cfg.sessions and cfg.sessions.summary_turns) or 3
-  local full = state.data.history
+  local full = get_state().data.history
   local messages = {}
   -- system prompt is added by llm.build_payload, not here
   if M.summary and M.summary ~= "" then
@@ -247,7 +252,7 @@ end
 
 --- Return the full unpruned history (for explicit recall commands).
 function M.get_full_messages()
-  return state.data.history
+  return get_state().data.history
 end
 
 return M

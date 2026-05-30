@@ -234,13 +234,13 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     local max_tool_rounds = 10
     local tool_defs = tools.get_tool_definitions(cfg.provider)
 
-    if tool_round > 0 then
-      vim.notify(
-        "[Wellm] Follow-up messages:\n" ..
-        vim.fn.json_encode(messages),
-        vim.log.levels.WARN
-      )
-    end
+    -- if tool_round > 0 then
+    --   vim.notify(
+    --     "[Wellm] Follow-up messages:\n" ..
+    --     vim.fn.json_encode(messages),
+    --     vim.log.levels.WARN
+    --   )
+    -- end
     M.raw_stream(messages, sys, acc_delta, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
@@ -253,8 +253,22 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       -- If there are tool calls, execute them and continue
       if tc and #tc > 0 and tool_round < max_tool_rounds then
         -- Add assistant message containing tool_use
-        local assistant_msg = { role = "assistant", content = content }
-        assistant_msg.tool_calls = tc
+        local assistant_msg = {
+            role = "assistant",
+            content = content,
+            tool_calls = {},
+        }
+
+        for _, call in ipairs(tc) do
+            table.insert(assistant_msg.tool_calls, {
+                id = call.id,
+                type = "function",
+                ["function"] = {
+                    name = call.func.name,
+                    arguments = call.func.arguments,
+                }
+            })
+        end
         table.insert(messages, assistant_msg)
 
         -- Determine confirmation behaviour based on filechanges setting
@@ -349,8 +363,22 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       if #tool_calls > 0 and tool_round < max_tool_rounds then
         -- Add assistant message with tool calls
-        local assistant_msg = { role = "assistant", content = content }
-        assistant_msg.tool_calls = tool_calls
+        local assistant_msg = {
+            role = "assistant",
+            content = content,
+            tool_calls = {},
+        }
+
+        for _, call in ipairs(tc) do
+            table.insert(assistant_msg.tool_calls, {
+                id = call.id,
+                type = "function",
+                ["function"] = {
+                    name = call.func.name,
+                    arguments = call.func.arguments,
+                }
+            })
+        end
         table.insert(messages, assistant_msg)
 
         local confirm_mode = cfg.filechanges or "filechanges_confirm"

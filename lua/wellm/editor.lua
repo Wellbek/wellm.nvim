@@ -6,19 +6,17 @@
 --- Edits are applied sequentially (bottom-to-top) so each edit sees
 --- the file state after all previous (higher-line) edits have been applied.
 ---
---- Format in AI response:
----   <wellm_edit path="rel/path" start="10" end="15">
----   replacement content for lines 10-15
----   </wellm_edit>
+--- Special rules:
+---   - For a new file: use start="1" end="0" (full content).
+---   - To prepend to an existing file: also use start="1" end="0" – this inserts
+---     the new content before the first line (does NOT replace the whole file).
+---   - To insert after line N: use start="N+1" end="N".
+---   - To replace a range: use start="A" end="B" (1‑based inclusive).
+---   - To append after the last line: use start="L+1" end="L" where L is current line count.
 ---
 --- Multiple <wellm_edit> blocks can appear in a single response.
 --- They are grouped by file and then applied in descending start_line order
 --- (bottom-to-top) to keep line numbers valid.
----
---- Insertions: set start = end + 1 (e.g. start="11" end="10")
----   means "insert after line 10, before line 11" without deleting.
---- Deletions: normal range with empty content.
---- New files: start="1" end="0" with full file content.
 
 local M = {}
 local state = require("wellm.state")
@@ -106,7 +104,7 @@ function M.group_edits_by_path(edits)
 end
 
 --------------------------------------------------------------------------------
--- Sequential edit application (no separate pre‑validation)
+-- Sequential edit application
 --------------------------------------------------------------------------------
 
 --- Split edit content string into a lines table.
@@ -119,20 +117,32 @@ end
 
 --- Apply a single edit to a given set of lines (the current file state).
 --- Returns new_lines (table) or nil + error message.
----@param existing_lines table Current lines of the file (0‑indexed list)
+---@param existing_lines table Current lines of the file (1‑based list)
 ---@param edit table { start_line, end_line, content }
 ---@return table|nil new_lines
 ---@return string|nil error
 local function apply_single_edit(existing_lines, edit)
   local new_lines = content_to_lines(edit.content)
-  local is_new_file = (edit.start_line == 1 and edit.end_line == 0)
-  local is_insertion = (not is_new_file) and (edit.start_line == edit.end_line + 1)
+  local is_prepend = (edit.start_line == 1 and edit.end_line == 0)
 
-  if is_new_file then
-    -- Replace whole file (even if existing_lines are empty)
-    return new_lines
-  elseif is_insertion then
-    -- Insert after edit.end_line (i.e. before line edit.end_line+1)
+  -- Handle prepend (insert at top) for existing files, or new file creation
+  if is_prepend then
+    if #existing_lines == 0 then
+      -- New file: replace empty content with new_lines
+      return new_lines
+    else
+      -- Prepend: new_lines then existing_lines
+      local result = {}
+      for _, l in ipairs(new_lines) do table.insert(result, l) end
+      for _, l in ipairs(existing_lines) do table.insert(result, l) end
+      return result
+    end
+  end
+
+  -- Insertion: start == end + 1
+  local is_insertion = (edit.start_line == edit.end_line + 1)
+  if is_insertion then
+    -- Insert after line edit.end_line (i.e. before line edit.end_line+1)
     if edit.end_line < 0 or edit.end_line > #existing_lines then
       return nil, string.format("Insertion point %d out of range (0-%d)", edit.end_line, #existing_lines)
     end
@@ -143,29 +153,29 @@ local function apply_single_edit(existing_lines, edit)
     for _, l in ipairs(new_lines) do table.insert(result, l) end
     for _, l in ipairs(after) do table.insert(result, l) end
     return result
-  else
-    -- Replace range (edit.start_line .. edit.end_line)
-    if edit.start_line < 1 then
-      return nil, string.format("start_line %d < 1", edit.start_line)
-    end
-    if edit.start_line > #existing_lines then
-      return nil, string.format("start_line %d exceeds file length %d", edit.start_line, #existing_lines)
-    end
-    if edit.end_line < edit.start_line then
-      return nil, string.format("end_line %d < start_line %d", edit.end_line, edit.start_line)
-    end
-    if edit.end_line > #existing_lines then
-      return nil, string.format("end_line %d exceeds file length %d", edit.end_line, #existing_lines)
-    end
-
-    local before = vim.list_slice(existing_lines, 1, edit.start_line - 1)
-    local after  = vim.list_slice(existing_lines, edit.end_line + 1)
-    local result = {}
-    for _, l in ipairs(before) do table.insert(result, l) end
-    for _, l in ipairs(new_lines) do table.insert(result, l) end
-    for _, l in ipairs(after) do table.insert(result, l) end
-    return result
   end
+
+  -- Replacement: replace a range of lines
+  if edit.start_line < 1 then
+    return nil, string.format("start_line %d < 1", edit.start_line)
+  end
+  if edit.start_line > #existing_lines then
+    return nil, string.format("start_line %d exceeds file length %d", edit.start_line, #existing_lines)
+  end
+  if edit.end_line < edit.start_line then
+    return nil, string.format("end_line %d < start_line %d", edit.end_line, edit.start_line)
+  end
+  if edit.end_line > #existing_lines then
+    return nil, string.format("end_line %d exceeds file length %d", edit.end_line, #existing_lines)
+  end
+
+  local before = vim.list_slice(existing_lines, 1, edit.start_line - 1)
+  local after  = vim.list_slice(existing_lines, edit.end_line + 1)
+  local result = {}
+  for _, l in ipairs(before) do table.insert(result, l) end
+  for _, l in ipairs(new_lines) do table.insert(result, l) end
+  for _, l in ipairs(after) do table.insert(result, l) end
+  return result
 end
 
 --- Apply a list of edits to a single file, applying them sequentially.
@@ -214,8 +224,6 @@ function M.apply_edits_to_file(path, sorted_edits, project_root)
 end
 
 --- Sort edits for a single file: descending by start_line (bottom‑to‑top).
---- Also checks for overlaps (but does not pre‑reject; it will be caught
---- during sequential application if invalid).
 ---@param file_edits table List of edits for one file
 ---@return table sorted_edits
 function M.sort_edits_descending(file_edits)

@@ -88,8 +88,8 @@ function M.parse_response(decoded)
             type = "function",
           }
           call["func"] = {
-            name = tc.function.name,
-            arguments = tc.function.arguments,
+            name = tc["function"].name,
+            arguments = tc["function"].arguments,
           }
           table.insert(tool_calls, call)
         end

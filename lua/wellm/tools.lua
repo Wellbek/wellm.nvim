@@ -70,7 +70,7 @@ function M.get_tool_definitions(provider)
     return {
       {
         type = "function",
-        function = {
+        ["function"] = {
           name = "read_file",
           description = "Read the complete content of a file. Use this when you need to see a file's content before editing.",
           parameters = read_file_params
@@ -78,7 +78,7 @@ function M.get_tool_definitions(provider)
       },
       {
         type = "function",
-        function = {
+        ["function"] = {
           name = "edit_file",
           description = "Replace the first occurrence of `search` with `replace` in a file. Use exact string matching. To delete, set `replace` to an empty string.",
           parameters = edit_file_params
@@ -86,7 +86,7 @@ function M.get_tool_definitions(provider)
       },
       {
         type = "function",
-        function = {
+        ["function"] = {
           name = "edit_file_multiple",
           description = "Apply multiple search/replace edits to one or more files. Edits are applied in the order given.",
           parameters = edit_multiple_params

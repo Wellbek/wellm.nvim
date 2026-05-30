@@ -74,7 +74,7 @@ M.defaults = {
   OUTPUT RULES:
   - Replace/Insert: raw code only, no markdown fences, no explanations.
   - Chat/Explain: Markdown, thorough, with examples.
-  - After significant changes, add a line: [DECISION: one-line summary]
+  - After significant changes, add a line: [DECISION: summary]
 
   FILE ACCESS:
   If you need to read a project file before answering, put the request on its own line:
@@ -95,7 +95,7 @@ M.defaults = {
   Use the Repo Map and Project Structure sections to find real paths.
   Only request files that exist. The marker must be alone on its own line.
 
-  After significant changes, add a line: [DECISION: one-line summary]]=],
+  After significant changes, add a line: [DECISION: summary]]=],
 
     orient = [[Analyse this software project and produce two markdown sections.
 
@@ -112,33 +112,41 @@ M.defaults = {
 
   Output ONLY the two sections above, valid markdown, nothing else.]],
 
-  fileops = [[When you need to modify files, use <wellm_edit> blocks:
+    fileops = [[When you need to modify files, use <wellm_edit> blocks with search/replace:
 
-  **Replace entire file:**
-  <wellm_edit path="path" start="1" end="-1">
-  complete new file content here
+  <wellm_edit path="relative/path.py">
+  <search>
+  exact existing code block you want to replace
+  </search>
+  <replace>
+  new code block
+  </replace>
   </wellm_edit>
 
-  **Prepend (add at top, keep existing):**
-  <wellm_edit path="path" start="0" end="0">
-  content to add at the top
+  Rules:
+  - To delete code: put empty <replace></replace> (or omit replace tag)
+  - To prepend: leave <search> empty (or omit search tag)
+  - The search block must match the existing code EXACTLY (including indentation and blank lines).
+  - Multiple edits are applied in the order you write them.
+  - Each edit works on the result of previous edits.
+
+  Example: replace hello_world with foo_bar
+  <wellm_edit path="fibonacci.py">
+  <search>
+  def hello_world():
+      """Print a hello world message."""
+      print("Hello, World!")
+  </search>
+  <replace>
+  def foo_bar():
+      """Print a foo bar message."""
+      print("Foo, Bar!")
+  </replace>
   </wellm_edit>
 
-  **Insert after line N:**
-  <wellm_edit path="path" start="N+1" end="N">
-  content to insert after line N
-  </wellm_edit>
-
-  **Replace lines A through B:**
-  <wellm_edit path="path" start="A" end="B">
-  replacement content
-  </wellm_edit>
-
-  **Delete lines A through B:** use empty content.
-  **Append to end:** use start="L+1" end="L" where L is current line count.
-  **Create new file:** use start="1" end="0" with the full content.
-
-  Never mix different intents with the same syntax. Use the specific markers above.]],
+  To delete a duplicate line, search for the exact line and leave replace empty.
+  To add a call inside main, search for the line inside the main block and replace with extended version.
+  Never use line numbers. Always copy-paste the exact code from the context.]],
 
   keys = {
     replace    = { "<leader>cr",  mode = "v", desc = "AI Replace Selection"     },

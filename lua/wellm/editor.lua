@@ -117,37 +117,54 @@ end
 
 --- Apply a single edit to a given set of lines (the current file state).
 --- Returns new_lines (table) or nil + error message.
+---
+--- Edit semantics (all line numbers are 1‑based inclusive):
+---   - New file creation:          start=1, end=0   (only valid if #existing_lines == 0)
+---   - Replace entire file:        start=1, end=-1  (always replaces, even if file exists)
+---   - Prepend (insert at top):    start=0, end=0   (inserts content before first line)
+---   - Insert after line N:        start=N+1, end=N
+---   - Replace range A-B:          start=A, end=B   (A ≤ B, both within existing lines)
+---   - Delete range A-B:           same as replace with empty content
+---   - Append:                      start=L+1, end=L where L = #existing_lines (insert after last)
+---
 ---@param existing_lines table Current lines of the file (1‑based list)
 ---@param edit table { start_line, end_line, content }
 ---@return table|nil new_lines
 ---@return string|nil error
 local function apply_single_edit(existing_lines, edit)
   local new_lines = content_to_lines(edit.content)
-  local is_prepend = (edit.start_line == 1 and edit.end_line == 0)
+  local start = edit.start_line
+  local finish = edit.end_line
 
-  -- Handle prepend (insert at top) for existing files, or new file creation
-  if is_prepend then
+  -- 1) New file creation (only allowed when file is empty)
+  if start == 1 and finish == 0 then
     if #existing_lines == 0 then
-      -- New file: replace empty content with new_lines
       return new_lines
     else
-      -- Prepend: new_lines then existing_lines
-      local result = {}
-      for _, l in ipairs(new_lines) do table.insert(result, l) end
-      for _, l in ipairs(existing_lines) do table.insert(result, l) end
-      return result
+      return nil, "Cannot create new file: file already exists (use start=1 end=-1 to replace)"
     end
   end
 
-  -- Insertion: start == end + 1
-  local is_insertion = (edit.start_line == edit.end_line + 1)
-  if is_insertion then
-    -- Insert after line edit.end_line (i.e. before line edit.end_line+1)
-    if edit.end_line < 0 or edit.end_line > #existing_lines then
-      return nil, string.format("Insertion point %d out of range (0-%d)", edit.end_line, #existing_lines)
+  -- 2) Replace entire file (regardless of existing content)
+  if start == 1 and finish == -1 then
+    return new_lines
+  end
+
+  -- 3) Prepend (insert at top, keep existing lines)
+  if start == 0 and finish == 0 then
+    local result = {}
+    for _, l in ipairs(new_lines) do table.insert(result, l) end
+    for _, l in ipairs(existing_lines) do table.insert(result, l) end
+    return result
+  end
+
+  -- 4) Insertion: start = finish + 1
+  if start == finish + 1 then
+    if finish < 0 or finish > #existing_lines then
+      return nil, string.format("Insertion point %d out of range (0-%d)", finish, #existing_lines)
     end
-    local before = vim.list_slice(existing_lines, 1, edit.end_line)
-    local after  = vim.list_slice(existing_lines, edit.end_line + 1)
+    local before = vim.list_slice(existing_lines, 1, finish)
+    local after  = vim.list_slice(existing_lines, finish + 1)
     local result = {}
     for _, l in ipairs(before) do table.insert(result, l) end
     for _, l in ipairs(new_lines) do table.insert(result, l) end
@@ -155,22 +172,22 @@ local function apply_single_edit(existing_lines, edit)
     return result
   end
 
-  -- Replacement: replace a range of lines
-  if edit.start_line < 1 then
-    return nil, string.format("start_line %d < 1", edit.start_line)
+  -- 5) Replacement (or deletion) of a range
+  if start < 1 then
+    return nil, string.format("Invalid start_line %d (must be ≥1 for replacement)", start)
   end
-  if edit.start_line > #existing_lines then
-    return nil, string.format("start_line %d exceeds file length %d", edit.start_line, #existing_lines)
+  if start > #existing_lines then
+    return nil, string.format("start_line %d exceeds file length %d", start, #existing_lines)
   end
-  if edit.end_line < edit.start_line then
-    return nil, string.format("end_line %d < start_line %d", edit.end_line, edit.start_line)
+  if finish < start then
+    return nil, string.format("end_line %d < start_line %d", finish, start)
   end
-  if edit.end_line > #existing_lines then
-    return nil, string.format("end_line %d exceeds file length %d", edit.end_line, #existing_lines)
+  if finish > #existing_lines then
+    return nil, string.format("end_line %d exceeds file length %d", finish, #existing_lines)
   end
 
-  local before = vim.list_slice(existing_lines, 1, edit.start_line - 1)
-  local after  = vim.list_slice(existing_lines, edit.end_line + 1)
+  local before = vim.list_slice(existing_lines, 1, start - 1)
+  local after  = vim.list_slice(existing_lines, finish + 1)
   local result = {}
   for _, l in ipairs(before) do table.insert(result, l) end
   for _, l in ipairs(new_lines) do table.insert(result, l) end

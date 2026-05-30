@@ -112,20 +112,33 @@ M.defaults = {
 
   Output ONLY the two sections above, valid markdown, nothing else.]],
 
-  fileops = [[When you need to modify an existing file, **do not output the whole file**. Use <wellm_edit> blocks with exact line ranges:
+  fileops = [[When you need to modify files, use <wellm_edit> blocks:
 
-<wellm_edit path="relative/path/to/file" start="10" end="15">
-replacement content for lines 10-15
-</wellm_edit>
+  **Replace entire file:**
+  <wellm_edit path="path" start="1" end="-1">
+  complete new file content here
+  </wellm_edit>
 
-- Insert new lines: set start = end+1 (e.g. start="11" end="10")
-- Delete lines: provide empty content inside the block
-- Create a new file: use start="1" end="0" with the full file content
+  **Prepend (add at top, keep existing):**
+  <wellm_edit path="path" start="0" end="0">
+  content to add at the top
+  </wellm_edit>
 
-You may include multiple <wellm_edit> blocks in your response. Edits are applied bottom-to-top so line numbers stay valid.
+  **Insert after line N:**
+  <wellm_edit path="path" start="N+1" end="N">
+  content to insert after line N
+  </wellm_edit>
 
-If the user explicitly asks for the whole file, you may output it with <wellm_file> instead, but prefer <wellm_edit> for modifications. Never output the entire content of an existing file unless specifically requested.]],
-  },
+  **Replace lines A through B:**
+  <wellm_edit path="path" start="A" end="B">
+  replacement content
+  </wellm_edit>
+
+  **Delete lines A through B:** use empty content.
+  **Append to end:** use start="L+1" end="L" where L is current line count.
+  **Create new file:** use start="1" end="0" with the full content.
+
+  Never mix different intents with the same syntax. Use the specific markers above.]],
 
   keys = {
     replace    = { "<leader>cr",  mode = "v", desc = "AI Replace Selection"     },

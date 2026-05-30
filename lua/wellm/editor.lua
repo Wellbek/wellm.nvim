@@ -113,24 +113,22 @@ end
 ---@return string|nil error_message
 ---@return table|nil sorted_edits
 function M.validate_edits(path, file_edits, project_root)
-  local full_path = project_root .. "/" .. path
+  local full_path  = project_root .. "/" .. path
   local file_exists = vim.fn.filereadable(full_path) == 1
 
-  -- Sort descending by start_line for bottom-to-top application
   local sorted = {}
   for _, e in ipairs(file_edits) do
     table.insert(sorted, {
-      path = e.path,
+      path       = e.path,
       start_line = e.start_line,
-      end_line = e.end_line,
-      content = e.content,
+      end_line   = e.end_line,
+      content    = e.content,
     })
   end
   table.sort(sorted, function(a, b)
     return a.start_line > b.start_line
   end)
 
-  -- Check for overlapping ranges (sorted descending, so sorted[i] is above sorted[i+1])
   for i = 1, #sorted - 1 do
     local upper = sorted[i]
     local lower = sorted[i + 1]
@@ -142,7 +140,6 @@ function M.validate_edits(path, file_edits, project_root)
     end
   end
 
-  -- Validate line ranges against file
   if file_exists then
     local line_count = #vim.fn.readfile(full_path)
     for _, edit in ipairs(sorted) do
@@ -150,7 +147,10 @@ function M.validate_edits(path, file_edits, project_root)
       local is_insertion = (not is_new_file) and (edit.start_line == edit.end_line + 1)
 
       if is_new_file then
-        -- Replacing an existing file wholesale — allowed, no range checks needed
+        -- Reject new-file syntax on an existing file — prevents accidental full wipe
+        return false,
+          string.format("%s already exists — use line ranges instead of start=1 end=0", path),
+          nil
       elseif is_insertion then
         if edit.end_line < 0 or edit.end_line > line_count then
           return false,
@@ -160,7 +160,9 @@ function M.validate_edits(path, file_edits, project_root)
         end
       else
         if edit.start_line < 1 then
-          return false, string.format("Invalid start_line %d in %s", edit.start_line, path), nil
+          return false,
+            string.format("Invalid start_line %d in %s", edit.start_line, path),
+            nil
         end
         if edit.end_line > line_count then
           return false,
@@ -177,9 +179,11 @@ function M.validate_edits(path, file_edits, project_root)
       end
     end
   else
-    -- New file: only allow a single edit with start=1, end=0
+    -- New file: must be exactly one edit with start=1 end=0
     if #sorted ~= 1 then
-      return false, string.format("New file %s must have exactly one edit block", path), nil
+      return false,
+        string.format("New file %s must have exactly one edit block", path),
+        nil
     end
     local edit = sorted[1]
     if edit.start_line ~= 1 or edit.end_line ~= 0 then

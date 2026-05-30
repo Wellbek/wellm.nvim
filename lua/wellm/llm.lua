@@ -288,14 +288,21 @@ end
 
 -- Public streaming call with READ handling (no user-visible intermediate messages)
 function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
-  vim.notify("[Wellm] mode=" .. tostring(mode), vim.log.levels.INFO)  -- temporary
+  local cfg = require("wellm").config
+  if not cfg.api_key or cfg.api_key == "" then
+    vim.notify("[Wellm] No API key", vim.log.levels.ERROR)
+    callback(nil)
+    return
+  end
 
   wellagent.build_file_cache()
 
   -- Accumulate the full assistant response across potential multiple rounds
   local full_assistant_response = ""
+  local current_round_response = ""
   local function acc_delta(delta)
     full_assistant_response = full_assistant_response .. delta
+    current_round_response = current_round_response .. delta
     on_delta(delta)
   end
 
@@ -316,11 +323,6 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         vim.notify("Empty response", vim.log.levels.WARN)
         callback(nil)
         return
-      end
-
-      -- Record usage
-      if used then
-        usage.record(cfg.model, used.input_tokens, used.output_tokens)
       end
 
       wellagent.extract_decisions(content)
@@ -353,6 +355,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         -- Add the invisible user message (this will not be shown to the user because we never save it to state.data.history)
         table.insert(new_messages, { role = "user", content = table.concat(follow_up, "\n") })
 
+        current_round_response = ""
         spinner.set_status("LLM thinking...")
         start_conversation(new_messages, initial_sys, read_round + 1)
         return
@@ -371,7 +374,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       end
 
       spinner.stop()
-      callback(full_assistant_response)
+      callback(current_round_response)
     end)
   end
 

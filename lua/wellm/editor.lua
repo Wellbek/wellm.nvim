@@ -92,11 +92,14 @@ local function apply_search_replace(content, edit)
   local search = edit.search
   local replace = edit.replace
 
+  -- Normalize line endings (remove \r)
+  content = content:gsub("\r\n", "\n")
+  search = search:gsub("\r\n", "\n")
+  replace = replace:gsub("\r\n", "\n")
+
   -- Case 1: No search → prepend replace
   if search == "" then
-    if replace == "" then
-      return content -- nothing to do
-    end
+    if replace == "" then return content end
     return replace .. (content ~= "" and "\n" .. content or "")
   end
 
@@ -104,22 +107,31 @@ local function apply_search_replace(content, edit)
   if replace == "" then
     local pos = content:find(search, 1, true)
     if not pos then
+      -- Try stripping one trailing newline from search
+      local alt_search = search:gsub("\n$", "")
+      if alt_search ~= search then
+        pos = content:find(alt_search, 1, true)
+      end
+    end
+    if not pos then
       return nil, "Search block not found"
     end
-    local before = content:sub(1, pos - 1)
-    local after = content:sub(pos + #search)
-    -- Remove possible extra newline if search was at line boundary? Keep simple.
-    return before .. after
+    return content:sub(1, pos - 1) .. content:sub(pos + #search)
   end
 
-  -- Case 3: Replace first occurrence of search with replace
+  -- Case 3: Replace first occurrence
   local pos = content:find(search, 1, true)
+  if not pos then
+    -- Try stripping trailing newline
+    local alt_search = search:gsub("\n$", "")
+    if alt_search ~= search then
+      pos = content:find(alt_search, 1, true)
+    end
+  end
   if not pos then
     return nil, "Search block not found"
   end
-  local before = content:sub(1, pos - 1)
-  local after = content:sub(pos + #search)
-  return before .. replace .. after
+  return content:sub(1, pos - 1) .. replace .. content:sub(pos + #search)
 end
 
 --------------------------------------------------------------------------------

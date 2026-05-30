@@ -290,4 +290,16 @@ function M.format_results(results)
   return table.concat(lines, "\n")
 end
 
+-- Compatibility stub for old validation API (now handled during sequential application)
+---@param path string File path (unused, kept for signature)
+---@param file_edits table List of edits for this file
+---@param project_root string (unused)
+---@return boolean ok
+---@return nil
+---@return table sorted_edits
+function M.validate_edits(path, file_edits, project_root)
+  local sorted = M.sort_edits_descending(file_edits)
+  return true, nil, sorted
+end
+
 return M

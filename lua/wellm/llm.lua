@@ -288,12 +288,7 @@ end
 
 -- Public streaming call with READ handling (no user-visible intermediate messages)
 function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
-  local cfg = require("wellm").config
-  if not cfg.api_key or cfg.api_key == "" then
-    vim.notify("[Wellm] No API key", vim.log.levels.ERROR)
-    callback(nil)
-    return
-  end
+  vim.notify("[Wellm] mode=" .. tostring(mode), vim.log.levels.INFO)  -- temporary
 
   wellagent.build_file_cache()
 

@@ -383,8 +383,16 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
             for _, r in ipairs(results) do if r.ok then ok_count = ok_count + 1 end end
             vim.notify(string.format("[Wellm] Applied %d/%d file edits", ok_count, #results), vim.log.levels.INFO)
           elseif filechanges_mode == "filechanges_confirm" then
-            -- Show confirm dialog
-            local grouped, order = editor.group_edits_by_path(edits)
+            -- Group edits by path manually (editor.group_edits_by_path may be missing)
+            local grouped = {}
+            local order = {}
+            for _, edit in ipairs(edits) do
+              if not grouped[edit.path] then
+                grouped[edit.path] = {}
+                table.insert(order, edit.path)
+              end
+              table.insert(grouped[edit.path], edit)
+            end
             local msg_lines = { "Wellm: Apply these file changes?" }
             for _, path in ipairs(order) do
               table.insert(msg_lines, string.format("  • %s (%d edit(s))", path, #grouped[path]))
@@ -494,7 +502,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
             for _, r in ipairs(results) do if r.ok then ok_count = ok_count + 1 end end
             vim.notify(string.format("[Wellm] Applied %d/%d file edits", ok_count, #results), vim.log.levels.INFO)
           elseif filechanges_mode == "filechanges_confirm" then
-            local grouped, order = editor.group_edits_by_path(edits)
+            -- Group edits by path manually
+            local grouped = {}
+            local order = {}
+            for _, edit in ipairs(edits) do
+              if not grouped[edit.path] then
+                grouped[edit.path] = {}
+                table.insert(order, edit.path)
+              end
+              table.insert(grouped[edit.path], edit)
+            end
             local msg_lines = { "Wellm: Apply these file changes?" }
             for _, path in ipairs(order) do
               table.insert(msg_lines, string.format("  • %s (%d edit(s))", path, #grouped[path]))

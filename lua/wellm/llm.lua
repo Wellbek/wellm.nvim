@@ -169,7 +169,7 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
       for _, line in ipairs(data) do
         if line ~= "" then
           table.insert(raw_lines, line)
-          vim.notify("RAW: " .. line)
+          --- vim.notify("RAW: " .. line)
           local delta, tc, used, _ = provider.parse_stream_line(line)
           if delta and delta ~= "" then
             full_content = full_content .. delta

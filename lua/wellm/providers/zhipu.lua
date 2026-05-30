@@ -37,40 +37,64 @@ end
 
 function M.parse_stream_line(line)
   local data = line:match("^data:%s*(.+)$")
-  if not data then return nil, nil, nil, false end
-  if data == "[DONE]" then return nil, nil, nil, true end
+  if not data then
+    return nil, nil, nil, false
+  end
+
+  if data == "[DONE]" then
+    return nil, nil, nil, true
+  end
 
   local ok, dec = pcall(vim.fn.json_decode, data)
-  if not ok then return nil, nil, nil, false end
+  if not ok then
+    return nil, nil, nil, false
+  end
 
   local delta_text = nil
+  local tool_calls = nil
+  local usage_data = nil
   local is_done = false
 
   if dec.choices and dec.choices[1] then
-    local delta = dec.choices[1].delta
+    local choice = dec.choices[1]
+    local delta = choice.delta
+
     if delta then
-      -- GLM models may send reasoning_content first, then content.
-      -- We prioritize content if present, otherwise take reasoning_content.
-      if delta.content then
-        delta_text = delta.content
-      elseif delta.reasoning_content then
-        delta_text = delta.reasoning_content
+      delta_text = delta.content or delta.reasoning_content
+
+      if delta.tool_calls then
+        tool_calls = {}
+
+        for _, tc in ipairs(delta.tool_calls) do
+          table.insert(tool_calls, {
+            id = tc.id,
+            type = "function",
+            func = {
+              name = tc["function"].name,
+              arguments = tc["function"].arguments,
+            }
+          })
+        end
       end
     end
-    if dec.choices[1].finish_reason == "stop" then
+
+    local finish_reason = choice.finish_reason
+
+    if finish_reason == "stop"
+      or finish_reason == "tool_calls"
+    then
       is_done = true
     end
   end
 
-  local usage_data = nil
   if dec.usage then
     usage_data = {
-      input_tokens  = dec.usage.prompt_tokens     or 0,
+      input_tokens = dec.usage.prompt_tokens or 0,
       output_tokens = dec.usage.completion_tokens or 0,
     }
   end
 
-  return delta_text, nil, usage_data, is_done
+  return delta_text, tool_calls, usage_data, is_done
 end
 
 function M.parse_response(decoded)

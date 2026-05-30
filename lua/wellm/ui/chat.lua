@@ -6,10 +6,6 @@
 --   > [input line]
 local M = {}
 
--- local state   = require("wellm.state")
--- local llm     = require("wellm.llm")
--- local session = require("wellm.session")
-
 local SEPARATOR = string.rep("-", 60)
 local INPUT_PFX = "> "
 
@@ -178,7 +174,6 @@ local function submit(buf, win)
   end
 
   local llm = require("wellm.llm")
-  local context = require("wellm.context")   -- added to refresh cache after edits
 
   llm.call_stream(input, "chat", on_delta, function(response)
     vim.schedule(function()
@@ -192,90 +187,6 @@ local function submit(buf, win)
       else
         -- Final canonical render (adds separators, resets input line, etc.)
         render_all(buf, win)
-
-        -- Process any file operations the LLM emitted using the unified editor
-        local cfg          = require("wellm").config
-        local mode         = cfg.filechanges or "filechanges_confirm"
-        local editor       = require("wellm.editor")
-        local wellagent    = require("wellm.wellagent")
-        local project_root = wellagent.get_project_root()
-
-        -- Helper to refresh context after successful edits
-        local function refresh_context_for_path(path)
-          local full_path = project_root .. "/" .. path
-          if vim.fn.filereadable(full_path) == 1 then
-            local lines = vim.fn.readfile(full_path)
-            local content = table.concat(lines, "\n")
-            context.inject_raw(full_path, content)
-          end
-        end
-
-        -- Use editor.process_response which handles parsing, grouping, and applying
-        if mode ~= "filechanges_off" then
-          -- Parse edits to see if any exist
-          local edits = editor.parse_edits(response)
-          if #edits > 0 then
-            if mode == "filechanges_on" then
-              -- Apply directly
-              local results = editor.process_response(response, project_root)
-              local ok_paths = {}
-              for _, r in ipairs(results) do
-                if r.ok then
-                  table.insert(ok_paths, r.path)
-                  refresh_context_for_path(r.path)
-                end
-              end
-              if #ok_paths > 0 then
-                append_before_input(buf, "\nFile changes:\n  + " .. table.concat(ok_paths, "\n  + "))
-              elseif #results > 0 then
-                append_before_input(buf, "\nFile changes: none applied (errors)")
-              end
-            elseif mode == "filechanges_confirm" then
-              -- Build a simple summary of affected files
-              local files = {}
-              for _, edit in ipairs(edits) do
-                files[edit.path] = true
-              end
-              local file_list = {}
-              for path in pairs(files) do
-                table.insert(file_list, path)
-              end
-              local msg = "Wellm: Apply file edits?\n"
-              for _, path in ipairs(file_list) do
-                msg = msg .. "  • " .. path .. "\n"
-              end
-              vim.schedule(function()
-                local choice = vim.fn.confirm(msg, "&Yes\n&No", 1)
-                if choice == 1 then
-                  local results = editor.process_response(response, project_root)
-                  local ok_paths = {}
-                  for _, r in ipairs(results) do
-                    if r.ok then
-                      table.insert(ok_paths, r.path)
-                      refresh_context_for_path(r.path)
-                    end
-                  end
-                  if #ok_paths > 0 then
-                    append_before_input(buf, "\nFile changes:\n  + " .. table.concat(ok_paths, "\n  + "))
-                  else
-                    append_before_input(buf, "\nFile changes: none applied (errors)")
-                  end
-                  vim.cmd.checktime()
-                else
-                  append_before_input(buf, "\nFile changes cancelled by user.")
-                end
-                scroll_bottom(win, buf)
-                vim.cmd('redraw')
-                if vim.api.nvim_win_is_valid(win) then
-                  local final_lc = vim.api.nvim_buf_line_count(buf)
-                  vim.api.nvim_win_set_cursor(win, { final_lc, #INPUT_PFX })
-                  vim.cmd("startinsert!")
-                end
-              end)
-              return  -- skip the later scroll & focus (done inside confirm)
-            end
-          end
-        end
       end
 
       scroll_bottom(win, buf)

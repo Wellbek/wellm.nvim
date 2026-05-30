@@ -1,10 +1,6 @@
 -- wellm/llm.lua
--- Central LLM call with:
---   tiered context injection (wellagent ctx -> selected files -> user msg)
---   auto [READ: path] tool loop
---   usage recording
---   session auto-save
---   optional streaming (raw_stream / call_stream)
+-- Central LLM call with tool use (function calling) support
+-- Replaces [READ] parsing and manual edit extraction with native tool calls.
 local M = {}
 
 local state     = require("wellm.state")
@@ -14,6 +10,7 @@ local wellagent = require("wellm.wellagent")
 local usage     = require("wellm.usage")
 local session   = require("wellm.session")
 local spinner   = require("wellm.ui.spinner")
+local tools     = require("wellm.tools")
 
 -- Token estimation heuristic
 function M.estimate_tokens(messages)
@@ -24,10 +21,7 @@ function M.estimate_tokens(messages)
   return total
 end
 
--- Payload builder
-
---- Build the messages array and system prompt for the API call.
---- mode: "replace" | "insert" | "chat" | "orient"
+-- Payload builder (unchanged except no extra parsing)
 function M.build_payload(user_text, mode, extra_file_ctx)
   local cfg = require("wellm").config
 
@@ -36,14 +30,14 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     or (mode == "chat" and cfg.prompts.chat)
     or cfg.prompts.coding
 
-  -- Append file-editing instructions for chat mode when filechanges is active
+  -- Append file-editing instructions – these are now largely replaced by tool definitions,
+  -- but kept for compatibility with models that do not support tools.
   local filechanges = cfg.filechanges or "filechanges_confirm"
   if mode == "chat" and filechanges ~= "filechanges_off" and cfg.prompts.fileops then
     sys = sys .. "\n\n" .. cfg.prompts.fileops
-    sys = sys .. "\n\nWhen editing existing files, use <wellm_edit> blocks with line ranges. For new files use start=\"1\" end=\"0\". Never output full existing files unless specifically asked to do so."
   end
 
-  -- Prepend .wellagent project context to system prompt
+  -- Prepend .wellagent project context
   local proj_ctx = wellagent.build_system_context()
   if proj_ctx then
     sys = proj_ctx .. "\n\n---\n\n" .. sys
@@ -84,9 +78,8 @@ function M.build_payload(user_text, mode, extra_file_ctx)
 
   if total_tokens > soft_limit then
     vim.notify("[Wellm] Context too large, truncating oldest messages...", vim.log.levels.WARN)
-    -- Keep system prompt and the most recent messages
     while #messages > 2 and total_tokens > soft_limit do
-      table.remove(messages, 2) -- remove second message (first is the user message we just added, keep that)
+      table.remove(messages, 2)
       total_tokens = M.estimate_tokens(messages) + sys_tokens
     end
   end
@@ -94,84 +87,11 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   return messages, sys
 end
 
--- Valid path heuristic
-local function looks_like_real_path(s)
-  s = vim.trim(s)
-  if s == "" then return false end
-  if s:match("[%^%$%(%)%%{%}%[%]%*%+%?<>|]") then return false end
-  local lower = s:lower()
-  for _, word in ipairs({"example","placeholder","your","path","similar","etc","foo","bar","todo"}) do
-    if lower:match(word) then return false end
-  end
-  return true
-end
-
---- Remove markdown code fences from text so tool-call markers
---- inside examples/documentation are never extracted.
-local function strip_code_fences(text)
-  -- Remove fenced code blocks (``` ... ```)
-  return text:gsub("```.-```", "")
-end
-
--- Extract multiple READ markers per line, return paths (relative)
-local function extract_read_paths(text)
-  local paths = {}
-  -- Match each [READ: path] individually. The pattern captures the part between
-  -- '[READ:' and the closing ']'. Works correctly even when multiple markers
-  -- appear on the same line because each ']' ends a match.
-  for path in text:gmatch("%[READ:%s*([^%]]+)%]") do
-    local trimmed = vim.trim(path)
-    if looks_like_real_path(trimmed) then
-      paths[#paths+1] = trimmed
-    end
-  end
-  return paths
-end
-
--- Process reads: returns {success={path:full}, failure={rel_path}}
-local function process_reads(rel_paths)
-  local success = {}
-  local failure = {}
-  local proj = wellagent.get_project_root()
-  local cwd = vim.fn.getcwd()
-
-  for _, rel in ipairs(rel_paths) do
-    local found = nil
-    -- Try project root first
-    local candidate = (rel:sub(1,1) == "/") and rel or (proj .. "/" .. rel)
-    if vim.fn.filereadable(candidate) == 1 then
-      found = candidate
-    else
-      -- Fallback to current working directory
-      candidate = (rel:sub(1,1) == "/") and rel or (cwd .. "/" .. rel)
-      if vim.fn.filereadable(candidate) == 1 then
-        found = candidate
-      end
-    end
-
-    if found then
-      local ok, lines = pcall(vim.fn.readfile, found)
-      if ok then
-        context.inject_raw(found, table.concat(lines, "\n"))
-        success[#success+1] = rel
-        vim.notify("[Wellm] Loaded: " .. rel .. " from " .. found, vim.log.levels.INFO)
-      else
-        failure[#failure+1] = rel
-        vim.notify("[Wellm] Failed to read: " .. rel .. " (read error)", vim.log.levels.WARN)
-      end
-    else
-      failure[#failure+1] = rel
-      vim.notify("[Wellm] File not found: " .. rel .. " (tried " .. proj .. " and " .. cwd .. ")", vim.log.levels.WARN)
-    end
-  end
-  return success, failure
-end
-
--- Raw non-streaming call
-function M.raw_call(messages, sys, cb)
+-- Raw non‑streaming call with tool definitions
+function M.raw_call(messages, sys, cb, tool_defs)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
-  local req = provider.build_request(cfg, messages, sys)
+  local req = provider.build_request(cfg, messages, sys, tool_defs)
 
   local tmp = os.tmpname()
   local f = io.open(tmp, "w")
@@ -183,7 +103,6 @@ function M.raw_call(messages, sys, cb)
   table.insert(curl_cmd, "@" .. tmp)
 
   local chunks = {}
-
   state.data.job_id = vim.fn.jobstart(curl_cmd, {
     stdout_buffered = true,
     on_stdout = function(_, data)
@@ -196,78 +115,70 @@ function M.raw_call(messages, sys, cb)
     on_exit = function(_, code)
       os.remove(tmp)
       if code ~= 0 then
-        vim.schedule(function() cb(nil, nil, "curl exit " .. code) end)
+        vim.schedule(function() cb(nil, nil, nil, "curl exit " .. code) end)
         return
       end
-
       local raw = table.concat(chunks, "")
       local ok, decoded = pcall(vim.fn.json_decode, raw)
-
       vim.schedule(function()
         if not ok then
-          cb(nil, nil, "JSON decode failed: " .. raw:sub(1,200))
+          cb(nil, nil, nil, "JSON decode failed")
           return
         end
-        local content, used, err = provider.parse_response(decoded)
-        cb(content, used, err)
+        local content, tool_calls, used, err = provider.parse_response(decoded)
+        cb(content, tool_calls, used, err)
       end)
     end,
   })
 end
 
--- Raw streaming call
-
---- Fire a streaming API call.
----   on_delta(text)              called for each text chunk as it arrives
----   on_done(full_text, usage, err)  called once when the stream ends
----
---- Falls back to raw_call if the provider does not implement build_stream_request.
-function M.raw_stream(messages, sys, on_delta, on_done)
+-- Raw streaming call with tool definitions
+function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
 
   if not provider.build_stream_request then
-    M.raw_call(messages, sys, function(content, used, err)
+    M.raw_call(messages, sys, function(content, tool_calls, used, err)
       if content and content ~= "" then
         vim.schedule(function() on_delta(content) end)
       end
-      on_done(content, used, err)
-    end)
+      on_done(content, tool_calls, used, err)
+    end, tool_defs)
     return
   end
 
-  local req = provider.build_stream_request(cfg, messages, sys)
-
+  local req = provider.build_stream_request(cfg, messages, sys, tool_defs)
   local tmp = os.tmpname()
   local f = io.open(tmp, "w")
   if f then f:write(req.body); f:close() end
 
-  -- -N / --no-buffer disables curl's internal output buffering so chunks
-  -- arrive as soon as the server sends them.
   local curl_cmd = { "curl", "-s", "-N", "-X", "POST", req.url }
   for _, h in ipairs(req.headers) do table.insert(curl_cmd, h) end
   table.insert(curl_cmd, "-d")
   table.insert(curl_cmd, "@" .. tmp)
 
   local full_content = ""
+  local tool_calls = {}
   local usage_acc = { input_tokens = 0, output_tokens = 0 }
   local raw_lines = {}
 
   state.data.job_id = vim.fn.jobstart(curl_cmd, {
-    -- stdout_buffered = false → on_stdout fires per-line as data arrives
     stdout_buffered = false,
     on_stdout = function(_, data)
       if not data then return end
       for _, line in ipairs(data) do
         if line ~= "" then
           table.insert(raw_lines, line)
-          local delta, used, _ = provider.parse_stream_line(line)
-
+          local delta, tc, used, _ = provider.parse_stream_line(line)
           if delta and delta ~= "" then
             full_content = full_content .. delta
             vim.schedule(function() on_delta(delta) end)
           end
-
+          if tc then
+            for _, call in ipairs(tc) do
+              tool_calls[#tool_calls+1] = call
+            end
+          end
           if used then
             if used.input_tokens then usage_acc.input_tokens = usage_acc.input_tokens + used.input_tokens end
             if used.output_tokens then usage_acc.output_tokens = usage_acc.output_tokens + used.output_tokens end
@@ -279,29 +190,25 @@ function M.raw_stream(messages, sys, on_delta, on_done)
       os.remove(tmp)
       vim.schedule(function()
         if code ~= 0 then
-          on_done(nil, nil, "curl exit " .. code)
+          on_done(nil, nil, nil, "curl exit " .. code)
           return
         end
-
-        -- If no SSE deltas were parsed the server likely returned a plain
-        -- JSON error body (auth failure, rate limit, etc.).
-        if full_content == "" then
+        if full_content == "" and #tool_calls == 0 then
           local raw = table.concat(raw_lines, "")
           vim.notify("[Wellm] Empty response, raw (first 200 chars): " .. raw:sub(1,200), vim.log.levels.WARN)
           local ok, decoded = pcall(vim.fn.json_decode, raw)
           if ok and decoded.error then
-            on_done(nil, nil, decoded.error.message or "API error")
+            on_done(nil, nil, nil, decoded.error.message or "API error")
             return
           end
         end
-
-        on_done(full_content, usage_acc, nil)
+        on_done(full_content, tool_calls, usage_acc, nil)
       end)
     end,
   })
 end
 
--- Public streaming call with READ handling (no user-visible intermediate messages)
+-- Public streaming call with tool loop
 function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -321,11 +228,12 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     on_delta(delta)
   end
 
-  local function start_conversation(initial_messages, initial_sys, read_round)
-    read_round = read_round or 0
-    local max_read_rounds = 5
+  local function start_conversation(messages, sys, tool_round)
+    tool_round = tool_round or 0
+    local max_tool_rounds = 10
+    local tool_defs = tools.get_tool_definitions()
 
-    M.raw_stream(initial_messages, initial_sys, acc_delta, function(content, used, err)
+    M.raw_stream(messages, sys, acc_delta, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
         spinner.stop()
@@ -333,68 +241,49 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         callback(nil)
         return
       end
-      if not content or content == "" then
-        -- Retry once with a stronger prompt, unless this is already a retry
-        if read_round > 0 then
-          spinner.stop()
-          vim.notify("Empty response after READ retry", vim.log.levels.ERROR)
-          callback(nil)
-          return
+
+      -- If there are tool calls, execute them and continue
+      if tc and #tc > 0 and tool_round < max_tool_rounds then
+        -- Add assistant message containing tool_use
+        local assistant_msg = { role = "assistant", content = content }
+        assistant_msg.tool_calls = tc   -- provider-specific field
+        table.insert(messages, assistant_msg)
+
+        -- Determine confirmation behaviour based on filechanges setting
+        local confirm_mode = cfg.filechanges or "filechanges_confirm"
+        local confirm_cb = nil
+        if confirm_mode == "filechanges_confirm" then
+          confirm_cb = function(msg)
+            return vim.fn.confirm(msg, "&Yes\n&No", 2) == 1
+          end
+        elseif confirm_mode == "filechanges_on" then
+          confirm_cb = function() return true end
         else
-          vim.notify("[Wellm] Empty response, retrying with explicit instruction", vim.log.levels.WARN)
-          local retry_msg = { role = "user", content = "You returned an empty response. Please provide your complete answer now. Do not request more files. Start your answer with a sentence." }
-          local new_messages = vim.deepcopy(initial_messages)
-          table.insert(new_messages, { role = "assistant", content = full_assistant_response })
-          table.insert(new_messages, retry_msg)
-          current_round_response = ""
-          spinner.set_status("LLM thinking (retry)...")
-          start_conversation(new_messages, initial_sys, read_round + 1)
-          return
-        end
-      end
-
-      wellagent.extract_decisions(content)
-
-      local cleaned = strip_code_fences(content)
-      local read_paths = extract_read_paths(cleaned)
-
-      if #read_paths > 0 and read_round < max_read_rounds then
-        spinner.set_status("reading files...")
-        local success, failure = process_reads(read_paths)
-
-        -- Build updated context block that includes the newly read files
-        local updated_ctx = context.build_block()
-        local follow_up_lines = {}
-        if #success > 0 then
-          follow_up_lines[#follow_up_lines+1] = "Loaded: " .. table.concat(success, ", ")
-        end
-        if #failure > 0 then
-          follow_up_lines[#follow_up_lines+1] = "Failed: " .. table.concat(failure, ", ")
-        end
-        if updated_ctx then
-          follow_up_lines[#follow_up_lines+1] = updated_ctx
-        end
-        follow_up_lines[#follow_up_lines+1] = "Now that you have the file contents, please provide your complete answer. Do not request more files. Start your answer now."
-
-        local follow_up = table.concat(follow_up_lines, "\n\n")
-
-        -- Ensure full_assistant_response is not empty (e.g., if model only output READ markers)
-        if full_assistant_response == "" then
-          full_assistant_response = "[READ requested]"
+          confirm_cb = function() return false end
         end
 
-        local new_messages = vim.deepcopy(initial_messages)
-        table.insert(new_messages, { role = "assistant", content = full_assistant_response })
-        table.insert(new_messages, { role = "user", content = follow_up })
+        -- Execute each tool call and append tool_result messages
+        for _, call in ipairs(tc) do
+          -- Ensure call.function.arguments is a table (provider may have already decoded it)
+          local args = call.function.arguments
+          if type(args) == "string" then
+            args = vim.json.decode(args)
+          end
+          local result = tools.execute(call.function.name, args, confirm_cb)
+          table.insert(messages, {
+            role = "tool",
+            tool_call_id = call.id,
+            content = result,
+          })
+        end
 
-        current_round_response = ""
-        spinner.set_status("LLM thinking...")
-        start_conversation(new_messages, initial_sys, read_round + 1)
+        -- Continue the conversation
+        spinner.set_status("LLM processing tool results...")
+        start_conversation(messages, sys, tool_round + 1)
         return
       end
 
-      -- No more reads: final answer. Save the entire accumulated response to history.
-      -- Avoid duplicating user message
+      -- No tool calls: final answer. Save to history.
       local last_msg = state.data.history[#state.data.history]
       if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
         table.insert(state.data.history, { role = "user", content = user_text })
@@ -405,12 +294,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         session.auto_save()
       end
 
-      -- File edit handling is now the responsibility of the caller (chat.lua).
-      -- We no longer process edits here to avoid duplicate confirmations.
-
       spinner.stop()
       callback(current_round_response)
-    end)
+    end, tool_defs)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
@@ -418,7 +304,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   start_conversation(messages, sys, 0)
 end
 
--- Buffered call (non‑streaming) with same logic
+-- Buffered (non‑streaming) call – adapted for tools as well
 function M.call(user_text, mode, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -430,60 +316,59 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   wellagent.build_file_cache()
 
   local full_response = ""
+  local tool_calls = {}
 
-  local function attempt(msgs, s, read_round)
-    read_round = read_round or 0
-    local max_read_rounds = 3
+  local function attempt(messages, sys, tool_round)
+    tool_round = tool_round or 0
+    local max_tool_rounds = 10
+    local tool_defs = tools.get_tool_definitions()
 
-    M.raw_call(msgs, s, function(content, used, err)
+    M.raw_call(messages, sys, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
         spinner.stop()
         callback("> [!] API Error: " .. tostring(err))
         return
       end
-      if not content or content == "" then
-        -- Retry once for non-streaming as well
-        if read_round > 0 then
-          spinner.stop()
-          callback("> [!] Empty response")
-          return
-        else
-          vim.notify("[Wellm] Empty response, retrying (non-streaming)", vim.log.levels.WARN)
-          local retry_msg = { role = "user", content = "You returned an empty response. Please provide your complete answer now. Do not request more files. Start your answer with a sentence." }
-          local new_messages = vim.deepcopy(msgs)
-          table.insert(new_messages, { role = "assistant", content = full_response })
-          table.insert(new_messages, retry_msg)
-          attempt(new_messages, s, read_round + 1)
-          return
-        end
-      end
-
-      full_response = full_response .. content
-      wellagent.extract_decisions(content)
-
-      local cleaned = strip_code_fences(content)
-      local read_paths = extract_read_paths(cleaned)
-
-      if #read_paths > 0 and read_round < max_read_rounds then
-        local success, failure = process_reads(read_paths)
-        local follow_up = {}
-        if #success > 0 then follow_up[#follow_up+1] = "Loaded: " .. table.concat(success, ", ") end
-        if #failure > 0 then follow_up[#follow_up+1] = "Failed: " .. table.concat(failure, ", ") end
-        follow_up[#follow_up+1] = "Now that you have the file contents, please provide your complete answer. Do not request more files. Start your answer now."
-
-        if full_response == "" then
-          full_response = "[READ requested]"
-        end
-
-        local new_messages = vim.deepcopy(msgs)
-        table.insert(new_messages, { role = "assistant", content = full_response })
-        table.insert(new_messages, { role = "user", content = table.concat(follow_up, "\n") })
-
-        attempt(new_messages, s, read_round + 1)
+      if not content and (not tc or #tc == 0) then
+        spinner.stop()
+        callback("> [!] Empty response")
         return
       end
 
+      full_response = full_response .. (content or "")
+      tool_calls = tc or {}
+
+      if #tool_calls > 0 and tool_round < max_tool_rounds then
+        -- Add assistant message with tool calls
+        local assistant_msg = { role = "assistant", content = content }
+        assistant_msg.tool_calls = tool_calls
+        table.insert(messages, assistant_msg)
+
+        local confirm_mode = cfg.filechanges or "filechanges_confirm"
+        local confirm_cb = nil
+        if confirm_mode == "filechanges_confirm" then
+          confirm_cb = function(msg) return vim.fn.confirm(msg, "&Yes\n&No", 2) == 1 end
+        elseif confirm_mode == "filechanges_on" then
+          confirm_cb = function() return true end
+        else
+          confirm_cb = function() return false end
+        end
+
+        for _, call in ipairs(tool_calls) do
+          local args = call.function.arguments
+          if type(args) == "string" then
+            args = vim.json.decode(args)
+          end
+          local result = tools.execute(call.function.name, args, confirm_cb)
+          table.insert(messages, { role = "tool", tool_call_id = call.id, content = result })
+        end
+
+        attempt(messages, sys, tool_round + 1)
+        return
+      end
+
+      -- No tool calls or max rounds reached
       if mode == "replace" or mode == "insert" then
         full_response = full_response:gsub("^```%w*\n", ""):gsub("\n```$", "")
       end
@@ -495,12 +380,9 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       table.insert(state.data.history, { role = "assistant", content = full_response })
       if cfg.sessions and cfg.sessions.save_automatically then session.auto_save() end
 
-      -- File edit handling is now the responsibility of the caller.
-      -- We no longer process edits here to avoid duplicate confirmations.
-
       spinner.stop()
       callback(full_response)
-    end)
+    end, tool_defs)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
@@ -508,7 +390,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   attempt(messages, sys, 0)
 end
 
--- Orient command
+-- Orient command unchanged
 function M.orient(on_done)
   local cfg = require("wellm").config
   local proj_root = wellagent.get_project_root()
@@ -519,7 +401,7 @@ function M.orient(on_done)
   local sys = "You produce concise, accurate developer documentation. Output only valid Markdown."
 
   spinner.start("Orienting...")
-  M.raw_call(msgs, sys, function(content, used, err)
+  M.raw_call(msgs, sys, function(content, tool_calls, used, err)
     if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
     if err or not content then
       spinner.stop()
@@ -532,11 +414,10 @@ function M.orient(on_done)
     wellagent.write_context("OVERVIEW.md",  vim.trim(overview))
     wellagent.write_context("STRUCTURE.md", vim.trim(structure))
 
-    -- Refresh the cached file structure after orient
     wellagent.refresh_structure()
     spinner.stop("Project oriented.")
     if on_done then on_done() end
-  end)
+  end, nil)
 end
 
 return M

@@ -370,6 +370,45 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         session.auto_save()
       end
 
+      -- Process file edits from assistant response
+      local filechanges_mode = cfg.filechanges or "filechanges_confirm"
+      if filechanges_mode ~= "filechanges_off" then
+        local editor = require("wellm.editor")
+        local proj_root = wellagent.get_project_root()
+        local edits = editor.parse_edits(full_assistant_response)
+        if #edits > 0 then
+          if filechanges_mode == "filechanges_on" then
+            local results = editor.process_response(full_assistant_response, proj_root)
+            local ok_count = 0
+            for _, r in ipairs(results) do if r.ok then ok_count = ok_count + 1 end end
+            vim.notify(string.format("[Wellm] Applied %d/%d file edits", ok_count, #results), vim.log.levels.INFO)
+          elseif filechanges_mode == "filechanges_confirm" then
+            -- Show confirm dialog
+            local grouped, order = editor.group_edits_by_path(edits)
+            local msg_lines = { "Wellm: Apply these file changes?" }
+            for _, path in ipairs(order) do
+              table.insert(msg_lines, string.format("  • %s (%d edit(s))", path, #grouped[path]))
+            end
+            local msg = table.concat(msg_lines, "\n")
+            vim.schedule(function()
+              local choice = vim.fn.confirm(msg, "&Yes\n&No", 2, "Question")
+              if choice == 1 then
+                local results = editor.process_response(full_assistant_response, proj_root)
+                local ok_list = {}
+                for _, r in ipairs(results) do if r.ok then table.insert(ok_list, r.path) end end
+                if #ok_list > 0 then
+                  vim.notify("[Wellm] Applied edits to: " .. table.concat(ok_list, ", "), vim.log.levels.INFO)
+                else
+                  vim.notify("[Wellm] No edits applied", vim.log.levels.WARN)
+                end
+              else
+                vim.notify("[Wellm] Edits skipped by user", vim.log.levels.INFO)
+              end
+            end)
+          end
+        end
+      end
+
       spinner.stop()
       callback(current_round_response)
     end)
@@ -441,6 +480,44 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       end
       table.insert(state.data.history, { role = "assistant", content = full_response })
       if cfg.sessions and cfg.sessions.save_automatically then session.auto_save() end
+
+      -- Process file edits from assistant response (non‑streaming)
+      local filechanges_mode = cfg.filechanges or "filechanges_confirm"
+      if filechanges_mode ~= "filechanges_off" then
+        local editor = require("wellm.editor")
+        local proj_root = wellagent.get_project_root()
+        local edits = editor.parse_edits(full_response)
+        if #edits > 0 then
+          if filechanges_mode == "filechanges_on" then
+            local results = editor.process_response(full_response, proj_root)
+            local ok_count = 0
+            for _, r in ipairs(results) do if r.ok then ok_count = ok_count + 1 end end
+            vim.notify(string.format("[Wellm] Applied %d/%d file edits", ok_count, #results), vim.log.levels.INFO)
+          elseif filechanges_mode == "filechanges_confirm" then
+            local grouped, order = editor.group_edits_by_path(edits)
+            local msg_lines = { "Wellm: Apply these file changes?" }
+            for _, path in ipairs(order) do
+              table.insert(msg_lines, string.format("  • %s (%d edit(s))", path, #grouped[path]))
+            end
+            local msg = table.concat(msg_lines, "\n")
+            vim.schedule(function()
+              local choice = vim.fn.confirm(msg, "&Yes\n&No", 2, "Question")
+              if choice == 1 then
+                local results = editor.process_response(full_response, proj_root)
+                local ok_list = {}
+                for _, r in ipairs(results) do if r.ok then table.insert(ok_list, r.path) end end
+                if #ok_list > 0 then
+                  vim.notify("[Wellm] Applied edits to: " .. table.concat(ok_list, ", "), vim.log.levels.INFO)
+                else
+                  vim.notify("[Wellm] No edits applied", vim.log.levels.WARN)
+                end
+              else
+                vim.notify("[Wellm] Edits skipped by user", vim.log.levels.INFO)
+              end
+            end)
+          end
+        end
+      end
 
       spinner.stop()
       callback(full_response)

@@ -146,7 +146,7 @@ M.defaults = {
 
   To delete a duplicate line, search for the exact line and leave replace empty.
   To add a call inside main, search for the line inside the main block and replace with extended version.
-  Never use line numbers. Always copy-paste the exact code from the context.]],
+  Never use line numbers. Always copy-paste the exact code from the context.]]},
 
   keys = {
     replace    = { "<leader>cr",  mode = "v", desc = "AI Replace Selection"     },

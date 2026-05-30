@@ -231,7 +231,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local function start_conversation(messages, sys, tool_round)
     tool_round = tool_round or 0
     local max_tool_rounds = 10
-    local tool_defs = tools.get_tool_definitions()
+    local tool_defs = tools.get_tool_definitions(cfg.provider)
 
     M.raw_stream(messages, sys, acc_delta, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
@@ -321,7 +321,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   local function attempt(messages, sys, tool_round)
     tool_round = tool_round or 0
     local max_tool_rounds = 10
-    local tool_defs = tools.get_tool_definitions()
+    local tool_defs = tools.get_tool_definitions(cfg.provider)
 
     M.raw_call(messages, sys, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end

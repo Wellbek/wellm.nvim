@@ -7,62 +7,96 @@ local editor    = require("wellm.editor")
 local wellagent = require("wellm.wellagent")
 local state     = require("wellm.state")
 
--- Return tool definitions for the API (Anthropic/OpenAI format)
-function M.get_tool_definitions()
-  return {
-    {
-      name = "read_file",
-      description = "Read the complete content of a file. Use this when you need to see a file's content before editing.",
-      input_schema = {
-        type = "object",
-        properties = {
-          path = { type = "string", description = "Relative path from the project root" }
-        },
-        required = { "path" }
+-- Return tool definitions in the format expected by the given provider
+-- provider: "anthropic" or "zhipu" (or "openai")
+function M.get_tool_definitions(provider)
+  -- Common parameters for the tools (OpenAI style)
+  local read_file_params = {
+    type = "object",
+    properties = {
+      path = { type = "string", description = "Relative path from the project root" }
+    },
+    required = { "path" }
+  }
+  local edit_file_params = {
+    type = "object",
+    properties = {
+      path = { type = "string", description = "Relative path from the project root" },
+      search = { type = "string", description = "Exact block of code to replace" },
+      replace = { type = "string", description = "New code block (empty to delete)" }
+    },
+    required = { "path", "search", "replace" }
+  }
+  local edit_multiple_params = {
+    type = "object",
+    properties = {
+      edits = {
+        type = "array",
+        items = {
+          type = "object",
+          properties = {
+            path = { type = "string" },
+            search = { type = "string" },
+            replace = { type = "string" }
+          },
+          required = { "path", "search", "replace" }
+        }
       }
     },
-    {
-      name = "edit_file",
-      description = "Replace the first occurrence of `search` with `replace` in a file. Use exact string matching. To delete, set `replace` to an empty string.",
-      input_schema = {
-        type = "object",
-        properties = {
-          path = { type = "string", description = "Relative path from the project root" },
-          search = { type = "string", description = "Exact block of code to replace" },
-          replace = { type = "string", description = "New code block (empty to delete)" }
-        },
-        required = { "path", "search", "replace" }
-      }
-    },
-    {
-      name = "edit_file_multiple",
-      description = "Apply multiple search/replace edits to one or more files. Edits are applied in the order given.",
-      input_schema = {
-        type = "object",
-        properties = {
-          edits = {
-            type = "array",
-            items = {
-              type = "object",
-              properties = {
-                path = { type = "string" },
-                search = { type = "string" },
-                replace = { type = "string" }
-              },
-              required = { "path", "search", "replace" }
-            }
-          }
-        },
-        required = { "edits" }
+    required = { "edits" }
+  }
+
+  if provider == "anthropic" then
+    -- Anthropic format (Claude)
+    return {
+      {
+        name = "read_file",
+        description = "Read the complete content of a file. Use this when you need to see a file's content before editing.",
+        input_schema = read_file_params
+      },
+      {
+        name = "edit_file",
+        description = "Replace the first occurrence of `search` with `replace` in a file. Use exact string matching. To delete, set `replace` to an empty string.",
+        input_schema = edit_file_params
+      },
+      {
+        name = "edit_file_multiple",
+        description = "Apply multiple search/replace edits to one or more files. Edits are applied in the order given.",
+        input_schema = edit_multiple_params
       }
     }
-  }
+  else
+    -- OpenAI‑compatible format (Zhipu, OpenAI, etc.)
+    return {
+      {
+        type = "function",
+        function = {
+          name = "read_file",
+          description = "Read the complete content of a file. Use this when you need to see a file's content before editing.",
+          parameters = read_file_params
+        }
+      },
+      {
+        type = "function",
+        function = {
+          name = "edit_file",
+          description = "Replace the first occurrence of `search` with `replace` in a file. Use exact string matching. To delete, set `replace` to an empty string.",
+          parameters = edit_file_params
+        }
+      },
+      {
+        type = "function",
+        function = {
+          name = "edit_file_multiple",
+          description = "Apply multiple search/replace edits to one or more files. Edits are applied in the order given.",
+          parameters = edit_multiple_params
+        }
+      }
+    }
+  end
 end
 
--- Execute a tool call and return the result as a string (for tool_result content)
--- @param tool_name string
--- @param params table (tool input)
--- @param confirm_callback function(msg) -> boolean, optional (called before destructive actions)
+-- Execute a tool call (same for all providers)
 function M.execute(tool_name, params, confirm_callback)
   if tool_name == "read_file" then
     local path = params.path
@@ -74,7 +108,6 @@ function M.execute(tool_name, params, confirm_callback)
     end
     local content = f:read("*a")
     f:close()
-    -- Optionally inject into context for future turns
     context.inject_raw(full, content)
     return content
   end
@@ -92,9 +125,8 @@ function M.execute(tool_name, params, confirm_callback)
       end
     end
 
-    -- Use the existing editor.apply_edits_to_file with a single edit
     local edits = { { path = path, search = search, replace = replace } }
-    local ok, err = editor.apply_edits_to_file(edits, proj)  -- we need to adapt this
+    local ok, err = editor.apply_edits_to_file(edits, proj)
     if not ok then
       return "Edit failed: " .. (err or "unknown error")
     end

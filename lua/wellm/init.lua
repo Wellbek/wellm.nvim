@@ -5,8 +5,8 @@ local M = {}
 
 function M.setup(opts)
   local defaults = require("wellm.config").defaults
-  M.config = vim.tbl_deep_extend("force", defaults, opts or {})
-
+  editor = require("wellm.editor"),
+  hash = require("wellm.util.hash"),
   -- Resolve API key
   -- 1. If no hardcoded key is provided in setup({ api_key = "..." })
   if not M.config.api_key or M.config.api_key == "" then

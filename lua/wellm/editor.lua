@@ -19,6 +19,7 @@
 --- New files: start="1" end="0" with full file content.
 
 local M = {}
+local state = require("wellm.state")
 
 --------------------------------------------------------------------------------
 -- Parsing
@@ -80,7 +81,7 @@ function M.parse_edits(text)
 end
 
 --------------------------------------------------------------------------------
--- Grouping & validation
+-- Grouping
 --------------------------------------------------------------------------------
 
 --- Group edits by file path, preserving order within each group.
@@ -129,7 +130,7 @@ function M.validate_edits(path, file_edits, project_root)
     return a.start_line > b.start_line
   end)
 
-  -- Check for overlaps
+  -- Check for overlapping ranges (sorted descending, so sorted[i] is above sorted[i+1])
   for i = 1, #sorted - 1 do
     local upper = sorted[i]
     local lower = sorted[i + 1]
@@ -145,14 +146,26 @@ function M.validate_edits(path, file_edits, project_root)
   if file_exists then
     local line_count = #vim.fn.readfile(full_path)
     for _, edit in ipairs(sorted) do
-      local is_insertion = edit.start_line == edit.end_line + 1
-      if not is_insertion then
+      local is_new_file  = edit.start_line == 1 and edit.end_line == 0
+      local is_insertion = (not is_new_file) and (edit.start_line == edit.end_line + 1)
+
+      if is_new_file then
+        -- Replacing an existing file wholesale — allowed, no range checks needed
+      elseif is_insertion then
+        if edit.end_line < 0 or edit.end_line > line_count then
+          return false,
+            string.format("Insertion point %d out of range (0-%d) in %s",
+              edit.end_line, line_count, path),
+            nil
+        end
+      else
         if edit.start_line < 1 then
           return false, string.format("Invalid start_line %d in %s", edit.start_line, path), nil
         end
         if edit.end_line > line_count then
           return false,
-            string.format("end_line %d exceeds file length %d in %s", edit.end_line, line_count, path),
+            string.format("end_line %d exceeds file length %d in %s",
+              edit.end_line, line_count, path),
             nil
         end
         if edit.start_line > edit.end_line then
@@ -161,24 +174,17 @@ function M.validate_edits(path, file_edits, project_root)
               edit.start_line, edit.end_line, path),
             nil
         end
-      else
-        if edit.end_line < 0 or edit.end_line > line_count then
-          return false,
-            string.format("Insertion point %d out of range (0-%d) in %s",
-              edit.end_line, line_count, path),
-            nil
-        end
       end
     end
   else
-    -- New file: only allow a single edit starting at line 1
+    -- New file: only allow a single edit with start=1, end=0
     if #sorted ~= 1 then
       return false, string.format("New file %s must have exactly one edit block", path), nil
     end
     local edit = sorted[1]
     if edit.start_line ~= 1 or edit.end_line ~= 0 then
       return false,
-        string.format("New file %s edit must start at line 1 (got start=%d end=%d)",
+        string.format("New file %s edit must use start=1 end=0 (got start=%d end=%d)",
           path, edit.start_line, edit.end_line),
         nil
     end
@@ -191,45 +197,39 @@ end
 -- Apply edits
 --------------------------------------------------------------------------------
 
---- Split content string into lines (without trailing newlines).
+--- Split edit content string into a lines table.
+--- Uses vim.split for correctness across all edge cases.
 ---@param content string
 ---@return table lines
 local function content_to_lines(content)
   if content == "" then return {} end
-  local lines = {}
-  for line in content:gmatch("([^\n]*)\n?") do
-    table.insert(lines, line)
-  end
-  if #lines > 0 and lines[#lines] == "" then
-    table.remove(lines)
-  end
-  return lines
+  return vim.split(content, "\n", { plain = true })
 end
 
 --- Apply a list of validated, sorted edits to a single file.
---- Edits MUST be sorted bottom-to-top (descending start_line).
+--- Edits MUST be sorted descending by start_line (bottom-to-top).
+--- Marks the session file cache dirty on success so the next context
+--- assembly re-injects fresh content instead of a stale reference.
 ---@param path string Relative file path
 ---@param sorted_edits table Validated edits sorted descending
 ---@param project_root string
 ---@return boolean ok
 ---@return string|nil error_message
 function M.apply_edits_to_file(path, sorted_edits, project_root)
-  local full_path = project_root .. "/" .. path
+  local full_path   = project_root .. "/" .. path
   local file_exists = vim.fn.filereadable(full_path) == 1
 
-  local existing_lines
-  if file_exists then
-    existing_lines = vim.fn.readfile(full_path)
-  else
-    existing_lines = {}
-  end
+  local existing_lines = file_exists and vim.fn.readfile(full_path) or {}
 
-  -- Apply edits bottom-to-top
   for _, edit in ipairs(sorted_edits) do
-    local new_lines = content_to_lines(edit.content)
-    local is_insertion = edit.start_line == edit.end_line + 1
+    local new_lines  = content_to_lines(edit.content)
+    local is_new_file  = edit.start_line == 1 and edit.end_line == 0
+    local is_insertion = (not is_new_file) and (edit.start_line == edit.end_line + 1)
 
-    if is_insertion then
+    if is_new_file then
+      -- Replace entire file contents
+      existing_lines = new_lines
+    elseif is_insertion then
       local before = vim.list_slice(existing_lines, 1, edit.end_line)
       local after  = vim.list_slice(existing_lines, edit.end_line + 1)
       existing_lines = {}
@@ -258,6 +258,12 @@ function M.apply_edits_to_file(path, sorted_edits, project_root)
     return false, string.format("Failed to write %s", path)
   end
 
+  -- Dirty the cache entry so the next context assembly re-injects
+  -- the full updated content instead of emitting a stale reference
+  if state.current_session then
+    state.current_session:mark_file_dirty(full_path)
+  end
+
   return true, nil
 end
 
@@ -275,27 +281,26 @@ function M.process_response(text, project_root)
   local results = {}
 
   for _, path in ipairs(order) do
-    local file_edits = grouped[path]
-    local ok, err, sorted = M.validate_edits(path, file_edits, project_root)
+    local ok, err, sorted = M.validate_edits(path, grouped[path], project_root)
 
     if not ok then
+      vim.notify(string.format("[Wellm] Edit rejected for %s: %s", path, err), vim.log.levels.WARN)
       table.insert(results, { path = path, ok = false, error = err })
     else
       local apply_ok, apply_err = M.apply_edits_to_file(path, sorted, project_root)
-      table.insert(results, {
-        path  = path,
-        ok    = apply_ok,
-        error = apply_err,
-      })
 
-      -- Reload if file is open in a buffer
+      if not apply_ok then
+        vim.notify(string.format("[Wellm] Edit failed for %s: %s", path, apply_err), vim.log.levels.ERROR)
+      end
+
+      table.insert(results, { path = path, ok = apply_ok, error = apply_err })
+
+      -- Reload buffer if the file is open in Neovim
       if apply_ok then
         local full_path = project_root .. "/" .. path
         for _, buf in ipairs(vim.api.nvim_list_bufs()) do
           if vim.api.nvim_buf_get_name(buf) == full_path then
-            vim.api.nvim_buf_call(buf, function()
-              vim.cmd("checktime")
-            end)
+            vim.api.nvim_buf_call(buf, function() vim.cmd("checktime") end)
           end
         end
       end

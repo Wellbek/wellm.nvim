@@ -1,8 +1,9 @@
 -- wellm/context.lua
 -- Manages M.state.data.context_files: add, remove, clear.
-local M = {}
+local hash_util = require("wellm.util.hash")
+local state     = require("wellm.state")
 
-local state = require("wellm.state")
+local M = {}
 
 local SKIP_PATTERNS = {
   "%.lock$", "%.min%.js$", "%.map$", "%.png$", "%.jpg$", "%.jpeg$",
@@ -18,41 +19,118 @@ local function should_skip(name)
   return false
 end
 
--- Chunk cache
-local chunk_cache = {}  -- path -> { mtime, chunks: {{start, end, content}} }
+---@param messages table
+---@param path string Absolute file path
+---@param turn_index number
+function M.inject_file(messages, path, turn_index)
+  turn_index = turn_index or 0
+  local session = state.current_session
+  local cache = session and session.file_cache or {}
+  local current_hash, content = hash_util.hash_file(path)
 
---- Split file into ~chunk_size lines, return chunks with line numbers
-function M.read_file_chunks(path, chunk_size)
-  chunk_size = chunk_size or (require("wellm").config.context and require("wellm").config.context.chunk_size) or 50
-  local ok, lines = pcall(vim.fn.readfile, path)
-  if not ok then return nil end
-  local chunks = {}
-  for i = 1, #lines, chunk_size do
-    local start_i = i
-    local end_i = math.min(i + chunk_size - 1, #lines)
-    local content = table.concat(lines, "\n", start_i, end_i)
-    table.insert(chunks, { start_line = start_i, end_line = end_i, content = content })
+  if not current_hash or not content then
+    table.insert(messages, {
+      role    = "user",
+      content = string.format("<file path=\"%s\">[unreadable]</file>", path),
+    })
+    return
   end
-  return chunks
+
+  local cached = cache[path]
+
+  if not cached then
+    cache[path] = { hash = current_hash, turn = turn_index }
+    table.insert(messages, {
+      role    = "user",
+      content = string.format("<file path=\"%s\">\n%s\n</file>", path, content),
+    })
+  elseif cached.hash == current_hash then
+    table.insert(messages, {
+      role    = "user",
+      content = string.format(
+        "<file_ref path=\"%s\" status=\"unchanged\" since_turn=\"%d\" />",
+        path, cached.turn
+      ),
+    })
+  else
+    cache[path] = { hash = current_hash, turn = turn_index }
+    table.insert(messages, {
+      role    = "user",
+      content = string.format(
+        "<file path=\"%s\" status=\"changed\">\n%s\n</file>",
+        path, content
+      ),
+    })
+  end
 end
 
---- Add a file using chunking and optional smart retrieval.
---- @param path string absolute file path
---- @param query string|nil natural language query to score chunks
---- @param top_k number how many best chunks to inject (default: 3)
-function M.add_file_smart(path, query, top_k)
-  top_k = top_k or (require("wellm").config.context and require("wellm").config.context.smart_top_k) or 3
-  local stat = vim.loop.fs_stat(path)
-  if not stat then return end
-  local cached = chunk_cache[path]
-  if cached and cached.mtime == stat.mtime then
-    -- use cached chunks
+---@param messages table
+---@param path string
+---@param start_line number
+---@param end_line number
+---@param content string
+---@param turn_index number
+function M.inject_visual_selection(messages, path, start_line, end_line, content, turn_index)
+  turn_index = turn_index or 0
+  local session   = state.current_session
+  local cache     = session and session.file_cache or {}
+  local line_range = string.format("%d-%d", start_line, end_line)
+  local cache_key  = string.format("%s:%s", path, line_range)
+  local current_hash = hash_util.hash_string(content)
+  local cached = cache[cache_key]
+
+  if not cached then
+    cache[cache_key] = { hash = current_hash, turn = turn_index, line_range = line_range }
+    table.insert(messages, {
+      role    = "user",
+      content = string.format(
+        "<selection path=\"%s\" start=\"%d\" end=\"%d\">\n%s\n</selection>",
+        path, start_line, end_line, content
+      ),
+    })
+  elseif cached.hash == current_hash then
+    table.insert(messages, {
+      role    = "user",
+      content = string.format(
+        "<selection_ref path=\"%s\" start=\"%d\" end=\"%d\" status=\"unchanged\" since_turn=\"%d\" />",
+        path, start_line, end_line, cached.turn
+      ),
+    })
   else
-    local chunks = M.read_file_chunks(path)
-    if not chunks then return end
-    chunk_cache[path] = { mtime = stat.mtime, chunks = chunks }
-    cached = chunk_cache[path]
+    cache[cache_key] = { hash = current_hash, turn = turn_index, line_range = line_range }
+    table.insert(messages, {
+      role    = "user",
+      content = string.format(
+        "<selection path=\"%s\" start=\"%d\" end=\"%d\" status=\"changed\">\n%s\n</selection>",
+        path, start_line, end_line, content
+      ),
+    })
   end
+end
+
+---@param messages table
+---@param role string
+---@param content string
+function M.inject_message(messages, role, content)
+  table.insert(messages, { role = role, content = content })
+end
+
+-- Per-session chunk cache (keyed by path)
+local chunk_cache = {}
+
+---@param path string
+---@param query string|nil Optional query for relevance scoring
+function M.add_file_smart(path, query)
+  if not chunk_cache[path] then
+    -- populate chunk_cache[path].chunks from file on first call
+    local _, content = hash_util.hash_file(path)
+    if not content then return end
+    -- simple chunking: one chunk per top-level block (fallback: whole file)
+    chunk_cache[path] = { chunks = {{ content = content, start_line = 1, end_line = 0 }} }
+  end
+
+  local cached = chunk_cache[path]
+
   if not query or query == "" then
     -- no query: add all chunks (fallback)
     for _, ch in ipairs(cached.chunks) do
@@ -72,26 +150,43 @@ function M.add_file_smart(path, query, top_k)
     end
     table.insert(scored, { chunk = ch, score = score })
   end
-  table.sort(scored, function(a,b) return a.score > b.score end)
-  for i = 1, math.min(top_k, #scored) do
+
+  table.sort(scored, function(a, b) return a.score > b.score end)
+  for i = 1, math.min(3, #scored) do
     local ch = scored[i].chunk
     M.add_file_chunks(path, nil, nil, ch.content, ch.start_line, ch.end_line)
   end
 end
 
---- Add a specific chunk of a file to context (with dedup)
+---@param session table Current session object
+---@param messages table Message array to append into
+---@param contexts table List of context descriptors
+function M.inject_contexts(session, messages, contexts)
+  local turn_index = #session.messages
+  for _, ctx in ipairs(contexts) do
+    if ctx.type == "file" then
+      M.inject_file(messages, ctx.path, turn_index)
+    elseif ctx.type == "visual" then
+      M.inject_visual_selection(messages, ctx.path, ctx.start_line, ctx.end_line, ctx.content, turn_index)
+    elseif ctx.type == "message" then
+      M.inject_message(messages, ctx.role, ctx.content)
+    end
+  end
+end
+
 function M.add_file_chunks(path, start_line, end_line, content, auto_detect_start, auto_detect_end)
   local key = path .. ":" .. (start_line or auto_detect_start or 0) .. "-" .. (end_line or auto_detect_end or 0)
-  if state.data.context_files[key] then return end -- dedup
+  if state.data.context_files[key] then return end
   state.data.context_files[key] = {
-    content = content,
-    path = path,
+    content    = content,
+    path       = path,
     start_line = start_line or auto_detect_start,
-    end_line = end_line or auto_detect_end,
-    ttl = (require("wellm").config.context and require("wellm").config.context.item_ttl) or 1,
+    end_line   = end_line   or auto_detect_end,
+    ttl        = (require("wellm").config.context and require("wellm").config.context.item_ttl) or 1,
     persistent = false,
   }
-  vim.notify("[Wellm] Added chunk: " .. vim.fn.fnamemodify(path, ":~:.") .. " lines " .. (start_line or "?") .. "-" .. (end_line or "?"))
+  vim.notify("[Wellm] Added chunk: " .. vim.fn.fnamemodify(path, ":~:.") ..
+    " lines " .. (start_line or "?") .. "-" .. (end_line or "?"))
 end
 
 --- Add a single file to context (kept for compatibility, but prefers chunking)
@@ -167,7 +262,7 @@ end
 --- Return a list of currently loaded paths.
 function M.list()
   local keys = {}
-  for k,_ in pairs(state.data.context_files) do
+  for k, _ in pairs(state.data.context_files) do
     table.insert(keys, k)
   end
   return keys
@@ -177,10 +272,11 @@ end
 function M.inject_raw(path, content)
   local key = path .. ":0-0"
   state.data.context_files[key] = {
-    content = content,
-    path = path,
-    start_line = 0, end_line = 0,
-    ttl = 1,
+    content    = content,
+    path       = path,
+    start_line = 0,
+    end_line   = 0,
+    ttl        = 1,
   }
 end
 

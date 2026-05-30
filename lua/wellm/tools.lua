@@ -138,16 +138,18 @@ function M.execute(tool_name, params, confirm_callback)
     local proj = wellagent.get_project_root()
     local results = {}
     for _, edit in ipairs(edits) do
+      local should_apply = true
       if confirm_callback then
         local msg = string.format("Apply edit to %s?\nSearch:\n%s", edit.path, edit.search)
         if not confirm_callback(msg) then
           table.insert(results, "Skipped: " .. edit.path)
-          goto continue
+          should_apply = false
         end
       end
-      local ok, err = editor.apply_edits_to_file({ edit }, proj)
-      table.insert(results, ok and ("Applied: " .. edit.path) or ("Failed: " .. edit.path .. " - " .. err))
-      ::continue::
+      if should_apply then
+        local ok, err = editor.apply_edits_to_file({ edit }, proj)
+        table.insert(results, ok and ("Applied: " .. edit.path) or ("Failed: " .. edit.path .. " - " .. err))
+      end
     end
     return table.concat(results, "\n")
   end

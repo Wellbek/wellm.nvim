@@ -82,9 +82,7 @@ end
 local function looks_like_real_path(s)
   s = vim.trim(s)
   if s == "" then return false end
-  if not s:match("^[%a_./]") then return false end
   if s:match("[%^%$%(%)%%{%}%[%]%*%+%?<>|]") then return false end
-  if not s:match("/") and not s:match("^%.") then return false end
   local lower = s:lower()
   for _, word in ipairs({"example","placeholder","your","path","similar","etc","foo","bar","todo"}) do
     if lower:match(word) then return false end
@@ -331,29 +329,28 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       local read_paths = extract_read_paths(cleaned)
 
       if #read_paths > 0 and read_round < max_read_rounds then
-        -- Process the reads
         spinner.set_status("reading files...")
         local success, failure = process_reads(read_paths)
 
-        -- Build a follow-up user message that will NOT be displayed
-        local follow_up = {}
+        -- Build updated context block that includes the newly read files
+        local updated_ctx = context.build_block()
+        local follow_up_lines = {}
         if #success > 0 then
-          follow_up[#follow_up+1] = "Loaded: " .. table.concat(success, ", ")
+          follow_up_lines[#follow_up_lines+1] = "Loaded: " .. table.concat(success, ", ")
         end
         if #failure > 0 then
-          follow_up[#follow_up+1] = "Failed: " .. table.concat(failure, ", ")
+          follow_up_lines[#follow_up_lines+1] = "Failed: " .. table.concat(failure, ", ")
         end
-        follow_up[#follow_up+1] = "Continue your answer. Do not request more files."
+        if updated_ctx then
+          follow_up_lines[#follow_up_lines+1] = updated_ctx
+        end
+        follow_up_lines[#follow_up_lines+1] = "Continue your answer. Do not request more files."
 
-        -- Create a new conversation state that includes the assistant's partial response
-        -- and an invisible user message (not saved to history) that tells the LLM to continue.
-        -- We build new_messages from the original initial_messages plus the partial assistant response
-        -- and the follow-up user message.
+        local follow_up = table.concat(follow_up_lines, "\n\n")
+
         local new_messages = vim.deepcopy(initial_messages)
-        -- The assistant's partial response (with READ markers) is added as an assistant message
         table.insert(new_messages, { role = "assistant", content = full_assistant_response })
-        -- Add the invisible user message (this will not be shown to the user because we never save it to state.data.history)
-        table.insert(new_messages, { role = "user", content = table.concat(follow_up, "\n") })
+        table.insert(new_messages, { role = "user", content = follow_up })
 
         current_round_response = ""
         spinner.set_status("LLM thinking...")

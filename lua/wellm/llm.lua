@@ -75,6 +75,22 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     content = table.concat(parts, "\n\n"),
   })
 
+  -- Token limit protection (prevent context overflow)
+  local max_tokens = cfg.max_tokens or 8192
+  local reserve = (cfg.llm and cfg.llm.output_reserve) or 1024
+  local sys_tokens = M.estimate_tokens({{role="system", content=sys}})
+  local total_tokens = M.estimate_tokens(messages) + sys_tokens
+  local soft_limit = max_tokens - reserve
+
+  if total_tokens > soft_limit then
+    vim.notify("[Wellm] Context too large, truncating oldest messages...", vim.log.levels.WARN)
+    -- Keep system prompt and the most recent messages
+    while #messages > 2 and total_tokens > soft_limit do
+      table.remove(messages, 2) -- remove second message (first is the user message we just added, keep that)
+      total_tokens = M.estimate_tokens(messages) + sys_tokens
+    end
+  end
+
   return messages, sys
 end
 
@@ -271,6 +287,7 @@ function M.raw_stream(messages, sys, on_delta, on_done)
         -- JSON error body (auth failure, rate limit, etc.).
         if full_content == "" then
           local raw = table.concat(raw_lines, "")
+          vim.notify("[Wellm] Empty response, raw (first 200 chars): " .. raw:sub(1,200), vim.log.levels.WARN)
           local ok, decoded = pcall(vim.fn.json_decode, raw)
           if ok and decoded.error then
             on_done(nil, nil, decoded.error.message or "API error")
@@ -317,10 +334,23 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         return
       end
       if not content or content == "" then
-        spinner.stop()
-        vim.notify("Empty response", vim.log.levels.WARN)
-        callback(nil)
-        return
+        -- Retry once with a stronger prompt, unless this is already a retry
+        if read_round > 0 then
+          spinner.stop()
+          vim.notify("Empty response after READ retry", vim.log.levels.ERROR)
+          callback(nil)
+          return
+        else
+          vim.notify("[Wellm] Empty response, retrying with explicit instruction", vim.log.levels.WARN)
+          local retry_msg = { role = "user", content = "You returned an empty response. Please provide your complete answer now. Do not request more files. Start your answer with a sentence." }
+          local new_messages = vim.deepcopy(initial_messages)
+          table.insert(new_messages, { role = "assistant", content = full_assistant_response })
+          table.insert(new_messages, retry_msg)
+          current_round_response = ""
+          spinner.set_status("LLM thinking (retry)...")
+          start_conversation(new_messages, initial_sys, read_round + 1)
+          return
+        end
       end
 
       wellagent.extract_decisions(content)
@@ -344,9 +374,14 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         if updated_ctx then
           follow_up_lines[#follow_up_lines+1] = updated_ctx
         end
-        follow_up_lines[#follow_up_lines+1] = "Continue your answer. Do not request more files."
+        follow_up_lines[#follow_up_lines+1] = "Now that you have the file contents, please provide your complete answer. Do not request more files. Start your answer now."
 
         local follow_up = table.concat(follow_up_lines, "\n\n")
+
+        -- Ensure full_assistant_response is not empty (e.g., if model only output READ markers)
+        if full_assistant_response == "" then
+          full_assistant_response = "[READ requested]"
+        end
 
         local new_messages = vim.deepcopy(initial_messages)
         table.insert(new_messages, { role = "assistant", content = full_assistant_response })
@@ -408,9 +443,20 @@ function M.call(user_text, mode, callback, extra_file_ctx)
         return
       end
       if not content or content == "" then
-        spinner.stop()
-        callback("> [!] Empty response")
-        return
+        -- Retry once for non-streaming as well
+        if read_round > 0 then
+          spinner.stop()
+          callback("> [!] Empty response")
+          return
+        else
+          vim.notify("[Wellm] Empty response, retrying (non-streaming)", vim.log.levels.WARN)
+          local retry_msg = { role = "user", content = "You returned an empty response. Please provide your complete answer now. Do not request more files. Start your answer with a sentence." }
+          local new_messages = vim.deepcopy(msgs)
+          table.insert(new_messages, { role = "assistant", content = full_response })
+          table.insert(new_messages, retry_msg)
+          attempt(new_messages, s, read_round + 1)
+          return
+        end
       end
 
       full_response = full_response .. content
@@ -424,7 +470,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
         local follow_up = {}
         if #success > 0 then follow_up[#follow_up+1] = "Loaded: " .. table.concat(success, ", ") end
         if #failure > 0 then follow_up[#follow_up+1] = "Failed: " .. table.concat(failure, ", ") end
-        follow_up[#follow_up+1] = "Continue."
+        follow_up[#follow_up+1] = "Now that you have the file contents, please provide your complete answer. Do not request more files. Start your answer now."
+
+        if full_response == "" then
+          full_response = "[READ requested]"
+        end
 
         local new_messages = vim.deepcopy(msgs)
         table.insert(new_messages, { role = "assistant", content = full_response })

@@ -191,59 +191,58 @@ local function submit(buf, win)
         -- Final canonical render (adds separators, resets input line, etc.)
         render_all(buf, win)
 
-        -- Process any file operations the LLM emitted
+        -- Process any file operations the LLM emitted using the unified editor
         local cfg          = require("wellm").config
         local mode         = cfg.filechanges or "filechanges_confirm"
         local editor       = require("wellm.editor")
         local wellagent    = require("wellm.wellagent")
         local project_root = wellagent.get_project_root()
 
-        local edits = editor.parse_edits(response)
-        if #edits > 0 and mode ~= "filechanges_off" then
-          -- Group and validate
-          local grouped, order = editor.group_edits_by_path(edits)
-          local pending = {}
-          local valid = true
-          for _, path in ipairs(order) do
-            local ok, err, sorted = editor.validate_edits(path, grouped[path], project_root)
-            if not ok then
-              append_before_input(buf, "Validation error: " .. err)
-              valid = false
-              break
-            end
-            table.insert(pending, { path = path, sorted = sorted })
-          end
-
-          if valid then
-            local function apply_pending()
-              local results = {}
-              for _, p in ipairs(pending) do
-                local ok, err = editor.apply_edits_to_file(p.path, p.sorted, project_root)
-                table.insert(results, { path = p.path, ok = ok, error = err })
-              end
-              local summary_lines = {}
-              for _, r in ipairs(results) do
-                if r.ok then
-                  table.insert(summary_lines, "  + " .. r.path)
-                else
-                  table.insert(summary_lines, "  x " .. r.path .. ": " .. (r.error or "unknown"))
-                end
-              end
-              append_before_input(buf, "\nFile changes:\n" .. table.concat(summary_lines, "\n"))
-              vim.cmd.checktime()
-            end
-
+        -- Use editor.process_response which handles parsing, grouping, and applying
+        if mode ~= "filechanges_off" then
+          -- Parse edits to see if any exist
+          local edits = editor.parse_edits(response)
+          if #edits > 0 then
             if mode == "filechanges_on" then
-              apply_pending()
+              -- Apply directly
+              local results = editor.process_response(response, project_root)
+              local ok_paths = {}
+              for _, r in ipairs(results) do
+                if r.ok then table.insert(ok_paths, r.path) end
+              end
+              if #ok_paths > 0 then
+                append_before_input(buf, "\nFile changes:\n  + " .. table.concat(ok_paths, "\n  + "))
+              elseif #results > 0 then
+                append_before_input(buf, "\nFile changes: none applied (errors)")
+              end
             elseif mode == "filechanges_confirm" then
+              -- Build a simple summary of affected files
+              local files = {}
+              for _, edit in ipairs(edits) do
+                files[edit.path] = true
+              end
+              local file_list = {}
+              for path in pairs(files) do
+                table.insert(file_list, path)
+              end
               local msg = "Wellm: Apply file edits?\n"
-              for _, p in ipairs(pending) do
-                msg = msg .. "  " .. p.path .. " (" .. #p.sorted .. " edit(s))\n"
+              for _, path in ipairs(file_list) do
+                msg = msg .. "  • " .. path .. "\n"
               end
               vim.schedule(function()
                 local choice = vim.fn.confirm(msg, "&Yes\n&No", 1)
                 if choice == 1 then
-                  apply_pending()
+                  local results = editor.process_response(response, project_root)
+                  local ok_paths = {}
+                  for _, r in ipairs(results) do
+                    if r.ok then table.insert(ok_paths, r.path) end
+                  end
+                  if #ok_paths > 0 then
+                    append_before_input(buf, "\nFile changes:\n  + " .. table.concat(ok_paths, "\n  + "))
+                  else
+                    append_before_input(buf, "\nFile changes: none applied (errors)")
+                  end
+                  vim.cmd.checktime()
                 else
                   append_before_input(buf, "\nFile changes cancelled by user.")
                 end

@@ -25,7 +25,6 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
   }
 end
 
--- Streaming variant: identical but with stream = true in body
 function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
   local req  = M.build_request(cfg, messages, system_prompt, tool_defs)
   local body = vim.fn.json_decode(req.body)
@@ -34,8 +33,6 @@ function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
   return req
 end
 
---- Parse one SSE line from Zhipu's OpenAI‑compatible event stream.
---- Returns: delta_text (string|nil), tool_calls (table|nil), usage (table|nil), is_done (bool)
 function M.parse_stream_line(line)
   local data = line:match("^data:%s*(.+)$")
   if not data then return nil, nil, nil, false end
@@ -45,19 +42,12 @@ function M.parse_stream_line(line)
   if not ok then return nil, nil, nil, false end
 
   local delta_text = nil
-  local tool_calls = nil
   local is_done = false
 
   if dec.choices and dec.choices[1] then
     local delta = dec.choices[1].delta
     if delta then
       delta_text = delta.content
-      if delta.tool_calls then
-        -- OpenAI streams tool calls as a list of chunks; we accumulate by index.
-        -- For simplicity in this plugin, we ignore streaming tool calls and rely on the final response.
-        -- A full implementation would accumulate across chunks, but we'll skip because final parse_response will contain them.
-        tool_calls = nil
-      end
     end
     if dec.choices[1].finish_reason == "stop" then
       is_done = true
@@ -72,10 +62,9 @@ function M.parse_stream_line(line)
     }
   end
 
-  return delta_text, tool_calls, usage_data, is_done
+  return delta_text, nil, usage_data, is_done
 end
 
--- Parse a non‑streaming response (including tool calls)
 function M.parse_response(decoded)
   if decoded.error then
     return nil, nil, nil, decoded.error.message or "Unknown API error"
@@ -97,9 +86,9 @@ function M.parse_response(decoded)
           table.insert(tool_calls, {
             id = tc.id,
             type = "function",
-            function = {
+            func = {                    -- renamed from "function"
               name = tc.function.name,
-              arguments = tc.function.arguments, -- JSON string, must be parsed later
+              arguments = tc.function.arguments, -- JSON string
             }
           })
         end

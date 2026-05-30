@@ -23,7 +23,6 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
   }
 end
 
--- Streaming variant: identical but with stream = true in body
 function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
   local req  = M.build_request(cfg, messages, system_prompt, tool_defs)
   local body = vim.fn.json_decode(req.body)
@@ -32,8 +31,6 @@ function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
   return req
 end
 
---- Parse one SSE line from Anthropic's event stream.
---- Returns: delta_text (string|nil), tool_calls (table|nil), usage (table|nil), is_done (bool)
 function M.parse_stream_line(line)
   local data = line:match("^data:%s*(.+)$")
   if not data then return nil, nil, nil, false end
@@ -42,32 +39,27 @@ function M.parse_stream_line(line)
   local ok, dec = pcall(vim.fn.json_decode, data)
   if not ok then return nil, nil, nil, false end
 
-  -- Text delta
   if dec.type == "content_block_delta"
       and dec.delta
       and dec.delta.type == "text_delta" then
     return dec.delta.text, nil, nil, false
   end
 
-  -- Tool use start (for streaming, we might need to accumulate; simpler: rely on final response)
   if dec.type == "content_block_start"
       and dec.content_block
       and dec.content_block.type == "tool_use" then
-    -- We ignore streaming tool calls and will get them in final message
+    -- ignore streaming tool calls; rely on final response
     return nil, nil, nil, false
   end
 
-  -- Output‑token usage arrives in message_delta
   if dec.type == "message_delta" and dec.usage then
     return nil, nil, { output_tokens = dec.usage.output_tokens or 0 }, false
   end
 
-  -- Input‑token usage arrives in message_start
   if dec.type == "message_start" and dec.message and dec.message.usage then
     return nil, nil, { input_tokens = dec.message.usage.input_tokens or 0 }, false
   end
 
-  -- message_stop signals end of stream
   if dec.type == "message_stop" then
     return nil, nil, nil, true
   end
@@ -75,7 +67,6 @@ function M.parse_stream_line(line)
   return nil, nil, nil, false
 end
 
--- Parse a non‑streaming response (including tool calls)
 function M.parse_response(decoded)
   if decoded.error then
     return nil, nil, nil, decoded.error.message or "Unknown API error"
@@ -90,9 +81,9 @@ function M.parse_response(decoded)
       table.insert(tool_calls, {
         id = block.id,
         type = "function",
-        function = {
+        func = {               -- renamed from "function" to "func"
           name = block.name,
-          arguments = block.input, -- already a table, not a string
+          arguments = block.input,
         }
       })
     end

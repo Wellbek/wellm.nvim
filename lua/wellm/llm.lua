@@ -246,7 +246,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       if tc and #tc > 0 and tool_round < max_tool_rounds then
         -- Add assistant message containing tool_use
         local assistant_msg = { role = "assistant", content = content }
-        assistant_msg.tool_calls = tc   -- provider-specific field
+        assistant_msg.tool_calls = tc
         table.insert(messages, assistant_msg)
 
         -- Determine confirmation behaviour based on filechanges setting
@@ -264,12 +264,12 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
         -- Execute each tool call and append tool_result messages
         for _, call in ipairs(tc) do
-          -- Ensure call.function.arguments is a table (provider may have already decoded it)
-          local args = call.function.arguments
+          -- Arguments may be a table or a JSON string; ensure table
+          local args = call.func.arguments
           if type(args) == "string" then
             args = vim.json.decode(args)
           end
-          local result = tools.execute(call.function.name, args, confirm_cb)
+          local result = tools.execute(call.func.name, args, confirm_cb)
           table.insert(messages, {
             role = "tool",
             tool_call_id = call.id,
@@ -356,11 +356,11 @@ function M.call(user_text, mode, callback, extra_file_ctx)
         end
 
         for _, call in ipairs(tool_calls) do
-          local args = call.function.arguments
+          local args = call.func.arguments
           if type(args) == "string" then
             args = vim.json.decode(args)
           end
-          local result = tools.execute(call.function.name, args, confirm_cb)
+          local result = tools.execute(call.func.name, args, confirm_cb)
           table.insert(messages, { role = "tool", tool_call_id = call.id, content = result })
         end
 

@@ -125,8 +125,15 @@ function M.execute(tool_name, params, confirm_callback)
       end
     end
 
-    local edits = { { path = path, search = search, replace = replace } }
-    local ok, err = editor.apply_edits_to_file(edits, proj)
+    local edits = {
+    {
+        path = path,
+        search = search,
+        replace = replace,
+    }
+    }
+
+    local ok, err = editor.apply_edits_to_file(path, edits, proj)
     if not ok then
       return "Edit failed: " .. (err or "unknown error")
     end
@@ -147,7 +154,11 @@ function M.execute(tool_name, params, confirm_callback)
         end
       end
       if should_apply then
-        local ok, err = editor.apply_edits_to_file({ edit }, proj)
+        local ok, err = editor.apply_edits_to_file(
+            edit.path,
+            { edit },
+            proj
+            )
         table.insert(results, ok and ("Applied: " .. edit.path) or ("Failed: " .. edit.path .. " - " .. err))
       end
     end

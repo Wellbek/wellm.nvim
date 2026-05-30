@@ -47,7 +47,13 @@ function M.parse_stream_line(line)
   if dec.choices and dec.choices[1] then
     local delta = dec.choices[1].delta
     if delta then
-      delta_text = delta.content
+      -- GLM models may send reasoning_content first, then content.
+      -- We prioritize content if present, otherwise take reasoning_content.
+      if delta.content then
+        delta_text = delta.content
+      elseif delta.reasoning_content then
+        delta_text = delta.reasoning_content
+      end
     end
     if dec.choices[1].finish_reason == "stop" then
       is_done = true
@@ -80,7 +86,7 @@ function M.parse_response(decoded)
   if decoded.choices and decoded.choices[1] then
     local message = decoded.choices[1].message
     if message then
-      content = message.content or ""
+      content = message.content or message.reasoning_content or ""
       if message.tool_calls then
         for _, tc in ipairs(message.tool_calls) do
           local call = {

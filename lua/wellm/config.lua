@@ -129,6 +129,11 @@ M.defaults = {
   - The search block must match the existing code EXACTLY (including indentation and blank lines).
   - Multiple edits are applied in the order you write them.
   - Each edit works on the result of previous edits.
+  When making multiple edits to the same file in one response:
+  - The first edit changes the file content.
+  - Subsequent edits must **search for the content AFTER the previous edit**.
+  - Always put <search> before <replace>. Never swap them.
+  - If you need to revert a change, use the current state as search.
 
   Example: replace hello_world with foo_bar
   <wellm_edit path="fibonacci.py">

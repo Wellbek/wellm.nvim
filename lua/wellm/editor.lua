@@ -54,6 +54,15 @@ function M.parse_edits(text)
     local search = block:match("<search>(.-)</search>")
     local replace = block:match("<replace>(.-)</replace>")
 
+    -- If both are present but the first tag in the block is <replace>, swap them.
+    if search and replace then
+      local first_tag = block:match("^%s*<%a+>") or ""
+      if first_tag == "<replace>" then
+        vim.notify("[Wellm] Swapped <replace> and <search> order (AI error)", vim.log.levels.WARN)
+        search, replace = replace, search
+      end
+    end
+
     -- Clean up leading/trailing newlines (one each, as in old editor)
     if search then
       if search:sub(1,1) == "\n" then search = search:sub(2) end

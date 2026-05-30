@@ -178,6 +178,8 @@ local function submit(buf, win)
   end
 
   local llm = require("wellm.llm")
+  local context = require("wellm.context")   -- added to refresh cache after edits
+
   llm.call_stream(input, "chat", on_delta, function(response)
     vim.schedule(function()
       if not response or response == "" then
@@ -198,6 +200,16 @@ local function submit(buf, win)
         local wellagent    = require("wellm.wellagent")
         local project_root = wellagent.get_project_root()
 
+        -- Helper to refresh context after successful edits
+        local function refresh_context_for_path(path)
+          local full_path = project_root .. "/" .. path
+          if vim.fn.filereadable(full_path) == 1 then
+            local lines = vim.fn.readfile(full_path)
+            local content = table.concat(lines, "\n")
+            context.inject_raw(full_path, content)
+          end
+        end
+
         -- Use editor.process_response which handles parsing, grouping, and applying
         if mode ~= "filechanges_off" then
           -- Parse edits to see if any exist
@@ -208,7 +220,10 @@ local function submit(buf, win)
               local results = editor.process_response(response, project_root)
               local ok_paths = {}
               for _, r in ipairs(results) do
-                if r.ok then table.insert(ok_paths, r.path) end
+                if r.ok then
+                  table.insert(ok_paths, r.path)
+                  refresh_context_for_path(r.path)
+                end
               end
               if #ok_paths > 0 then
                 append_before_input(buf, "\nFile changes:\n  + " .. table.concat(ok_paths, "\n  + "))
@@ -235,7 +250,10 @@ local function submit(buf, win)
                   local results = editor.process_response(response, project_root)
                   local ok_paths = {}
                   for _, r in ipairs(results) do
-                    if r.ok then table.insert(ok_paths, r.path) end
+                    if r.ok then
+                      table.insert(ok_paths, r.path)
+                      refresh_context_for_path(r.path)
+                    end
                   end
                   if #ok_paths > 0 then
                     append_before_input(buf, "\nFile changes:\n  + " .. table.concat(ok_paths, "\n  + "))

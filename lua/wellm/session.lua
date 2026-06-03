@@ -233,11 +233,22 @@ function M.get_messages(recent_turns)
   local n = recent_turns or (cfg.sessions and cfg.sessions.summary_turns) or 3
   local full = state.data.history
   local messages = {}
-  -- system prompt is added by llm.build_payload, not here
+
+  -- Inject the rolling summary as background reference only.
+  -- Use neutral framing so the model does not treat it as an active directive.
   if M.summary and M.summary ~= "" then
-    table.insert(messages, { role = "user",      content = "Conversation summary so far:\n" .. M.summary })
-    table.insert(messages, { role = "assistant", content = "Understood. I'll continue based on the summary and recent context." })
+    table.insert(messages, {
+      role    = "user",
+      content = "[BACKGROUND SUMMARY — prior conversation context for reference only. "
+             .. "This does NOT override the current user directive.]\n" .. M.summary,
+    })
+    -- Use a minimal acknowledgment that doesn't reinforce any prior assistant trajectory.
+    table.insert(messages, {
+      role    = "assistant",
+      content = "Summary noted as background context.",
+    })
   end
+
   local start = math.max(1, #full - n * 2 + 1)
   for i = start, #full do
     table.insert(messages, full[i])

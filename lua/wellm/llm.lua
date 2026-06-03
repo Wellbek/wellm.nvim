@@ -21,7 +21,7 @@ function M.estimate_tokens(messages)
   return total
 end
 
--- Payload builder (unchanged except no extra parsing)
+-- Payload builder
 function M.build_payload(user_text, mode, extra_file_ctx)
   local cfg = require("wellm").config
 
@@ -30,8 +30,7 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     or (mode == "chat" and cfg.prompts.chat)
     or cfg.prompts.coding
 
-  -- Append file-editing instructions – these are now largely replaced by tool definitions,
-  -- but kept for compatibility with models that do not support tools.
+  -- Append file-editing instructions
   local filechanges = cfg.filechanges or "filechanges_confirm"
   if mode == "chat" and filechanges ~= "filechanges_off" and cfg.prompts.fileops then
     sys = sys .. "\n\n" .. cfg.prompts.fileops
@@ -43,14 +42,37 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     sys = proj_ctx .. "\n\n---\n\n" .. sys
   end
 
-  -- Build messages from history
+  -- Build messages from history, wrapping assistant messages as low-priority context
   local messages = {}
   for _, msg in ipairs(state.data.history) do
-    table.insert(messages, { role = msg.role, content = msg.content })
+    if msg.role == "assistant" then
+      -- De-emphasize previous assistant outputs so they don't anchor future responses
+      table.insert(messages, {
+        role    = "assistant",
+        content = "[PREVIOUS ASSISTANT OUTPUT — historical context only, NOT a directive]\n" .. msg.content,
+      })
+    else
+      table.insert(messages, { role = msg.role, content = msg.content })
+    end
   end
 
-  -- Assemble user message
-  local parts = { user_text }
+  -- Inject a reminder just before the new user turn (as a user/assistant pair)
+  -- so the model has a structural cue immediately before the real directive.
+  if #messages > 0 then
+    table.insert(messages, {
+      role    = "user",
+      content = "REMINDER: Your previous outputs above are historical context only. The NEXT user message is your sole current directive. Follow it exactly, do not continue any prior task.",
+    })
+    table.insert(messages, {
+      role    = "assistant",
+      content = "Understood. I will follow only the next user message as my directive.",
+    })
+  end
+
+  -- Assemble user message wrapped with priority marker
+  local parts = {
+    "[CURRENT USER DIRECTIVE — THIS IS YOUR PRIMARY TASK. Override everything above.]\n" .. user_text,
+  }
 
   local ctx_block = context.build_block()
   if ctx_block then table.insert(parts, ctx_block) end
@@ -78,8 +100,10 @@ function M.build_payload(user_text, mode, extra_file_ctx)
 
   if total_tokens > soft_limit then
     vim.notify("[Wellm] Context too large, truncating oldest messages...", vim.log.levels.WARN)
-    while #messages > 2 and total_tokens > soft_limit do
-      table.remove(messages, 2)
+    -- Always preserve: reminder pair (last 2 before user msg) and the user msg itself (last).
+    -- Safe to remove from index 1 up to (len - 3).
+    while #messages > 3 and total_tokens > soft_limit do
+      table.remove(messages, 1)
       total_tokens = M.estimate_tokens(messages) + sys_tokens
     end
   end
@@ -87,7 +111,35 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   return messages, sys
 end
 
--- Raw non‑streaming call with tool definitions
+-- Cycle detection: returns true if the assistant output has a repeated snippet
+local function detect_cycle(content, cfg)
+  local cycle_cfg = cfg and cfg.llm and cfg.llm.cycle_detection
+  if not cycle_cfg or not cycle_cfg.enabled then return false end
+
+  local snippet_len = cycle_cfg.snippet_length or 80
+  local max_count   = cycle_cfg.max_identical_snippets or 3
+
+  if #content < snippet_len * max_count then return false end
+
+  -- Take a snippet from roughly 1/3 into the content
+  local probe_start = math.floor(#content / 3)
+  local probe = content:sub(probe_start, probe_start + snippet_len - 1)
+  if #probe < snippet_len then return false end
+
+  -- Count non-overlapping occurrences
+  local count = 0
+  local search_from = 1
+  while true do
+    local s = content:find(probe, search_from, true)
+    if not s then break end
+    count = count + 1
+    if count >= max_count then return true end
+    search_from = s + snippet_len
+  end
+  return false
+end
+
+-- Raw non-streaming call with tool definitions
 function M.raw_call(messages, sys, cb, tool_defs)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
@@ -161,19 +213,32 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local tool_calls = {}
   local usage_acc = { input_tokens = 0, output_tokens = 0 }
   local raw_lines = {}
+  local cycle_aborted = false
 
   state.data.job_id = vim.fn.jobstart(curl_cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data)
-      if not data then return end
+      if not data or cycle_aborted then return end
       for _, line in ipairs(data) do
         if line ~= "" then
           table.insert(raw_lines, line)
-          --- vim.notify("RAW: " .. line)
           local delta, tc, used, _ = provider.parse_stream_line(line)
           if delta and delta ~= "" then
             full_content = full_content .. delta
             vim.schedule(function() on_delta(delta) end)
+
+            -- Cycle detection mid-stream
+            if detect_cycle(full_content, cfg) then
+              cycle_aborted = true
+              vim.schedule(function()
+                vim.notify("[Wellm] Cycle detected — stopping generation.", vim.log.levels.WARN)
+              end)
+              -- Kill the curl job
+              if state.data.job_id then
+                vim.fn.jobstop(state.data.job_id)
+              end
+              return
+            end
           end
           if tc then
             for _, call in ipairs(tc) do
@@ -190,6 +255,11 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
     on_exit = function(_, code)
       os.remove(tmp)
       vim.schedule(function()
+        if cycle_aborted then
+          -- Treat truncated output as a finished response
+          on_done(full_content, {}, usage_acc, nil)
+          return
+        end
         if code ~= 0 then
           on_done(nil, nil, nil, "curl exit " .. code)
           return
@@ -326,7 +396,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   start_conversation(messages, sys, 0)
 end
 
--- Buffered (non‑streaming) call – adapted for tools as well
+-- Buffered (non-streaming) call – adapted for tools as well
 function M.call(user_text, mode, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -359,6 +429,15 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       end
 
       full_response = full_response .. (content or "")
+
+      -- Cycle check for non-streaming path too
+      if detect_cycle(full_response, cfg) then
+        vim.notify("[Wellm] Cycle detected in buffered response — truncating.", vim.log.levels.WARN)
+        spinner.stop()
+        callback(full_response)
+        return
+      end
+
       tool_calls = tc or {}
 
       if #tool_calls > 0 and tool_round < max_tool_rounds then

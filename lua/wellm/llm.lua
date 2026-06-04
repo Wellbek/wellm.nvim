@@ -254,7 +254,7 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   })
 end
 
--- wellm/llm.lua – call_stream (full replacement)
+-- wellm/llm.lua – call_stream
 function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -276,20 +276,22 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
   local state = require("wellm.state")
   local session = state.current_session
-  if not session then
-    vim.notify("[Wellm] No active session", vim.log.levels.ERROR)
-    callback(nil)
-    return
-  end
 
-  -- Persistent duplicate call tracking across ALL turns of this session
-  if not session.executed_tool_calls then
-    session.executed_tool_calls = {}
+  -- Use session tracking if available, otherwise per‑call fallback
+  local executed_calls = {}
+  local function get_tracker()
+    if session then
+      if not session.executed_tool_calls then
+        session.executed_tool_calls = {}
+      end
+      return session.executed_tool_calls
+    end
+    return executed_calls
   end
 
   local function start_conversation(messages, sys, tool_round)
     tool_round = tool_round or 0
-    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 15  -- increased
+    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 15
     local tool_defs = require("wellm.tools").get_tool_definitions(cfg.provider)
 
     M.raw_stream(messages, sys, acc_delta, function(content, tc, used, err)
@@ -342,12 +344,13 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           end
 
           local key = call.func.name .. ":" .. vim.json.encode(args)
+          local tracker = get_tracker()
           local result
-          if session.executed_tool_calls[key] then
-            result = "[skipped: identical tool call already executed in this session]"
+          if tracker[key] then
+            result = "[skipped: identical tool call already executed]"
             vim.notify("[Wellm] Duplicate tool call skipped: " .. call.func.name, vim.log.levels.WARN)
           else
-            session.executed_tool_calls[key] = true
+            tracker[key] = true
             result = require("wellm.tools").execute(call.func.name, args, confirm_cb)
           end
 

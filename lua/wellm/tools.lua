@@ -6,6 +6,7 @@ local context   = require("wellm.context")
 local editor    = require("wellm.editor")
 local wellagent = require("wellm.wellagent")
 local state     = require("wellm.state")
+local hash_util = require("wellm.util.hash")
 
 -- Return tool definitions in the format expected by the given provider
 -- provider: "anthropic" or "zhipu" (or "openai")
@@ -102,13 +103,56 @@ function M.execute(tool_name, params, confirm_callback)
     local path = params.path
     local proj = wellagent.get_project_root()
     local full = path:sub(1,1) == "/" and path or (proj .. "/" .. path)
+    
+    -- Get current session
+    local session = state.current_session
+    if not session then
+      -- Fallback if no session: just read the file
+      local f, err = io.open(full, "r")
+      if not f then
+        return "Error: cannot read file " .. path .. " - " .. (err or "file not found")
+      end
+      local content = f:read("*a")
+      f:close()
+      context.inject_raw(full, content)
+      return content
+    end
+    
+    -- Initialize read_files table if not exists
+    if not session.read_files then
+      session.read_files = {}
+    end
+    
+    -- Check if file exists and is readable
     local f, err = io.open(full, "r")
     if not f then
       return "Error: cannot read file " .. path .. " - " .. (err or "file not found")
     end
+    
+    -- Read content and compute hash
     local content = f:read("*a")
     f:close()
+    local current_hash = hash_util.hash_string(content)
+    
+    -- Check session cache for unchanged file
+    local cached = session.read_files[full]
+    if cached and cached.hash == current_hash then
+      -- File unchanged since last read, return short reference
+      local turn_info = cached.turn and (" (since turn " .. cached.turn .. ")") or ""
+      return string.format(
+        "[File unchanged%s. Content already provided in previous turn. Use that content.]",
+        turn_info
+      )
+    end
+    
+    -- Store new hash and current turn
+    local turn_index = #(state.data.history or {}) + 1
+    session.read_files[full] = { hash = current_hash, turn = turn_index }
+    
+    -- Inject raw content into context for future reference
     context.inject_raw(full, content)
+    
+    -- Return full content for this turn
     return content
   end
 
@@ -117,12 +161,19 @@ function M.execute(tool_name, params, confirm_callback)
     local search = params.search
     local replace = params.replace
     local proj = wellagent.get_project_root()
+    local full = path:sub(1,1) == "/" and path or (proj .. "/" .. path)
 
     if confirm_callback then
       local msg = string.format("Apply edit to %s?\nSearch:\n%s\nReplace:\n%s", path, search, replace)
       if not confirm_callback(msg) then
         return "Edit cancelled by user."
       end
+    end
+
+    -- Mark file as dirty in session cache if it was previously read
+    local session = state.current_session
+    if session and session.read_files and session.read_files[full] then
+      session.read_files[full] = nil
     end
 
     local edits = {
@@ -144,6 +195,16 @@ function M.execute(tool_name, params, confirm_callback)
     local edits = params.edits
     local proj = wellagent.get_project_root()
     local results = {}
+    
+    -- Mark all affected files as dirty in session cache
+    local session = state.current_session
+    for _, edit in ipairs(edits) do
+      local full = edit.path:sub(1,1) == "/" and edit.path or (proj .. "/" .. edit.path)
+      if session and session.read_files and session.read_files[full] then
+        session.read_files[full] = nil
+      end
+    end
+    
     for _, edit in ipairs(edits) do
       local should_apply = true
       if confirm_callback then

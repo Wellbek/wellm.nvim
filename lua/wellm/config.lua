@@ -65,12 +65,8 @@ M.defaults = {
   },
 
   llm = {
-    output_reserve = 1024,
-    cycle_detection = {
-      enabled                = true,
-      max_identical_snippets = 3,   -- how many times the same text can appear before we break
-      snippet_length         = 80,  -- chars to compare for repetition detection
-    },
+    output_reserve  = 2048,
+    max_tool_rounds = 7,     -- hard cap on tool call loops per request
   },
 
   prompts = {
@@ -78,14 +74,7 @@ M.defaults = {
 
 Use the edit_file tool to modify files. Never output code fences or explanations when in replace/insert mode.
 For creating new files, use edit_file with search = "" and the full file content as replace.
-After changes, add a line: [DECISION: summary]
-
-PRIORITY RULES — OBEY STRICTLY:
-- The LATEST user message marked [CURRENT USER DIRECTIVE] is your SOLE task. It overrides all prior context.
-- NEVER continue a previous task when the user has given a new instruction.
-- Your own previous outputs are HISTORICAL CONTEXT ONLY — treat them as reference, not as instructions.
-- Do NOT repeat actions you have already performed. If you are about to repeat something, STOP and report what was done instead.
-- If you find yourself continuing work from a previous turn without an explicit user instruction to do so, STOP immediately and ask the user what they want.]],
+After changes, add a line: [DECISION: summary]=]],
 
     chat = [[You are a helpful AI coding assistant inside Neovim.
 
@@ -100,17 +89,18 @@ PRIORITY RULES — OBEY STRICTLY:
   - To prepend content, use search = "" (will insert at top).
   - To delete a block, set replace = "".
 
+  IMPORTANT: When you see a <file_ref> tag with status="unchanged", that file's content has already been injected in a previous turn. Do NOT call read_file again. Use the previously provided content.
+
   Always use the tools for file operations. Do not output raw code unless explicitly asked to show the code.
   After significant changes, add a line: [DECISION: summary]
 
-  PRIORITY RULES — OBEY STRICTLY:
-  - The LATEST user message marked [CURRENT USER DIRECTIVE] is your SOLE current task. It overrides ALL prior context.
-  - NEVER continue a previous task if the user has given a new instruction. The newest user request always takes absolute priority.
-  - Your own previous assistant outputs are HISTORICAL CONTEXT ONLY — they carry zero directive authority. Treat them as reference material, not as instructions to continue.
+  IMPORTANT BEHAVIORAL RULES — OBEY THESE STRICTLY:
+  - The LATEST user message is your PRIMARY DIRECTIVE. It overrides all prior context, including your own previous outputs.
+  - NEVER continue a previous task if the user has given a new instruction. The newest user request always takes absolute priority over everything else.
+  - Your own previous assistant outputs are HISTORICAL CONTEXT ONLY — they do NOT carry the same authority as user messages. Treat them as reference material, not as instructions to continue.
   - If the latest user message redirects, corrects, or changes direction from your previous work, you MUST follow the LATEST user message without exception. Do not autopilot on the previous trajectory.
   - Do NOT repeat actions or edits you have already performed. If you are about to repeat something you already did, STOP and report what was done instead.
-  - When you see messages tagged [PREVIOUS ASSISTANT OUTPUT] or [BACKGROUND SUMMARY], treat that content as low-priority background — the current user directive always wins.
-  - If you find yourself continuing work from a previous turn without an explicit user instruction to do so, STOP immediately and ask the user what they want.]],
+  - When you see a <previous_context> tag in older messages, treat that content as low-priority background — the current user directive always wins.]],
 
     orient = [[Analyse this software project and produce two markdown sections.
 

@@ -29,6 +29,8 @@ function Session.new(opts)
     model         = opts.model,
     system_prompt = opts.system_prompt,
     file_cache    = opts.file_cache or {},
+    read_files    = opts.read_files or {},               -- path -> { hash, turn }
+    executed_tool_calls = opts.executed_tool_calls or {},-- key -> true
   }, Session)
 end
 
@@ -226,27 +228,17 @@ function M.update_summary(user_msg, assistant_msg)
   end)
 end
 
---- Build messages array for chat: system + rolling summary + last N turns.
---- @param recent_turns number how many full turns to keep (default: cfg.session.summary_turns or 3)
-function M.get_messages(recent_turns)
+--- Build messages array for chat: rolling summary + last N turns.
+--- @param recent_turns number how many full turns to keep (default: cfg.sessions.summary_turns or 3)
+function Session:get_messages(recent_turns)
   local cfg = require("wellm").config
   local n = recent_turns or (cfg.sessions and cfg.sessions.summary_turns) or 3
-  local full = state.data.history
+  local full = self.messages or {}   -- use session's own message history
   local messages = {}
 
-  -- Inject the rolling summary as background reference only.
-  -- Use neutral framing so the model does not treat it as an active directive.
-  if M.summary and M.summary ~= "" then
-    table.insert(messages, {
-      role    = "user",
-      content = "[BACKGROUND SUMMARY — prior conversation context for reference only. "
-             .. "This does NOT override the current user directive.]\n" .. M.summary,
-    })
-    -- Use a minimal acknowledgment that doesn't reinforce any prior assistant trajectory.
-    table.insert(messages, {
-      role    = "assistant",
-      content = "Summary noted as background context.",
-    })
+  if self.summary and self.summary ~= "" then
+    table.insert(messages, { role = "user",      content = "Conversation summary so far:\n" .. self.summary })
+    table.insert(messages, { role = "assistant", content = "Understood." })
   end
 
   local start = math.max(1, #full - n * 2 + 1)

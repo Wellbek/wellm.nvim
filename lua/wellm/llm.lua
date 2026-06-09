@@ -76,15 +76,16 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     content = table.concat(parts, "\n\n"),
   })
 
-  -- Token limit protection
-  local max_tokens = cfg.max_tokens or 8192
+  -- Token limit protection using actual context window (not response max_tokens)
+  local context_window = cfg.context_window or 200000  -- most models support >=200k tokens
   local reserve = (cfg.llm and cfg.llm.output_reserve) or 1024
   local sys_tokens = M.estimate_tokens({{role="system", content=sys}})
   local total_tokens = M.estimate_tokens(messages) + sys_tokens
-  local soft_limit = max_tokens - reserve
+  local soft_limit = context_window - reserve
 
   if total_tokens > soft_limit then
-    vim.notify("[Wellm] Context too large, truncating oldest messages...", vim.log.levels.WARN)
+    vim.notify(string.format("[Wellm] Context too large (%d tokens, limit %d), truncating oldest messages...",
+                total_tokens, soft_limit), vim.log.levels.WARN)
     while #messages > 1 and total_tokens > soft_limit do
       table.remove(messages, 1)
       total_tokens = M.estimate_tokens(messages) + sys_tokens

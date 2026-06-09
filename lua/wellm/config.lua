@@ -39,6 +39,7 @@ M.defaults = {
   api_key      = nil,
   model        = "claude-sonnet-4-5",
   max_tokens   = 8192,
+  context_window = 300000,
   filechanges = "filechanges_confirm", -- "filechanges_off" | "filechanges_confirm" | "filechanges_on"
 
   wellagent = {

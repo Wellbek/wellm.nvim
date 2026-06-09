@@ -208,6 +208,8 @@ function M.open()
   local state = require("wellm.state")
   local session = require("wellm.session")
 
+  session.get_or_create()
+
   -- 1. If window is already open, just focus it
   if state.data.chat_win and vim.api.nvim_win_is_valid(state.data.chat_win) then
     vim.api.nvim_set_current_win(state.data.chat_win)

@@ -61,7 +61,8 @@ function M.open()
   local function render_preview(idx)
     local e = entries[idx]
     if not e then return end
-    local hist = session.load(e.id)
+    local sess = session.load_session(e.id)
+    local hist = sess and sess.messages or {}
     local lines = {
       "# " .. e.title,
       "> " .. e.date .. "  |  " .. e.message_count .. " messages",
@@ -106,19 +107,20 @@ function M.open()
 
   -- Load and continue
   map("<CR>", function()
-    local idx  = vim.api.nvim_win_get_cursor(lwin)[1]
-    local e    = entries[idx]
+    local idx = vim.api.nvim_win_get_cursor(lwin)[1]
+    local e = entries[idx]
     if not e then return end
-    local hist = session.load(e.id)
-    if not hist then
+    local sess = session.load_session(e.id)   -- new function
+    if not sess then
       vim.notify("[Wellm] Could not load session.", vim.log.levels.WARN)
       return
     end
     close()
-    state.data.history            = hist
+    state.current_session = sess
     state.data.current_session_id = e.id
+    state.data.history = vim.deepcopy(sess.messages)
     require("wellm.ui.chat").open()
-    vim.notify(string.format("[Wellm] Resumed: %s", e.title:sub(1, 60)))
+    vim.notify(string.format("[Wellm] Resumed: %s", (sess.title or e.title or ""):sub(1, 60)))
   end)
 
   -- Delete session
@@ -129,6 +131,8 @@ function M.open()
     vim.ui.input({ prompt = "Delete session '" .. e.title:sub(1, 40) .. "'? (y/N) " }, function(input)
       if input and input:lower() == "y" then
         os.remove(e.file)
+        os.remove(wellagent.get_root() .. "/sessions/" .. e.id .. ".json")
+        os.remove(wellagent.get_root() .. "/sessions/" .. e.id .. ".md")
         table.remove(entries, idx)
         if #entries == 0 then
           close()

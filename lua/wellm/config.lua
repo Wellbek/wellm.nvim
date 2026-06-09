@@ -56,7 +56,7 @@ M.defaults = {
   sessions = {
     save_automatically = true,
     max_sessions       = 100,
-    summary_turns      = 3,
+    summary_turns      = 6,
   },
 
   context = {
@@ -67,7 +67,7 @@ M.defaults = {
 
   llm = {
     output_reserve  = 2048,
-    max_tool_rounds = 7,     -- hard cap on tool call loops per request
+    max_tool_rounds = 30,     -- hard cap on tool call loops per request
   },
 
   prompts = {

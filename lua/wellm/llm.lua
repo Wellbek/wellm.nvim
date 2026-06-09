@@ -46,6 +46,14 @@ function M.build_payload(user_text, mode, extra_file_ctx)
     sys = proj_ctx .. "\n\n---\n\n" .. sys
   end
 
+  -- Inject session context (intent + summary) into system prompt
+  if state.current_session then
+    local sess_hdr = state.current_session:context_header()
+    if sess_hdr then
+      sys = sess_hdr .. "\n\n---\n\n" .. sys
+    end
+  end
+
   -- Build message list using rolling summary (keeps only recent turns + summary)
   local messages = {}
   if state.current_session then
@@ -293,6 +301,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     return
   end
 
+  local session = require("wellm.session")
+  local sess = session.get_or_create()   -- ensures state.current_session exists
+
   local wellagent = require("wellm.wellagent")
   wellagent.build_file_cache()
 
@@ -405,15 +416,15 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       -- Final answer: strip pre‑tool reasoning preamble
       local clean_response = clean_assistant_content(full_assistant_response, tool_round > 0)
 
-      -- Save to history (only final user/assistant pairs)
-      local last_msg = state.data.history[#state.data.history]
-      if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
-        table.insert(state.data.history, { role = "user", content = user_text })
-      end
-      table.insert(state.data.history, { role = "assistant", content = clean_response })
+      -- Save to session (not directly to state.data.history)
+      sess:add_message("user", user_text)
+      sess:update_user_intent(user_text)
+
+      sess:add_message("assistant", clean_response)
+      sess:update_summary()   -- non‑blocking, cheap LLM call
 
       if cfg.sessions and cfg.sessions.save_automatically then
-        require("wellm.session").auto_save()
+        session.auto_save()
       end
 
       require("wellm.ui.spinner").stop()
@@ -434,6 +445,9 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     callback("> [!] No API key")
     return
   end
+
+  local session = require("wellm.session")
+  local sess = session.get_or_create()   -- ensures state.current_session exists
 
   wellagent.build_file_cache()
 
@@ -520,12 +534,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       local had_tools = tool_round > 0
       local clean_response = clean_assistant_content(full_response, had_tools)
 
-      local last_msg = state.data.history[#state.data.history]
-      if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
-        table.insert(state.data.history, { role = "user", content = user_text })
+      -- Save to session (not directly to state.data.history)
+      sess:add_message("user", user_text)
+      sess:update_user_intent(user_text)
+
+      sess:add_message("assistant", clean_response)
+      sess:update_summary()   -- non‑blocking, cheap LLM call
+
+      if cfg.sessions and cfg.sessions.save_automatically then
+        session.auto_save()
       end
-      table.insert(state.data.history, { role = "assistant", content = clean_response })
-      if cfg.sessions and cfg.sessions.save_automatically then session.auto_save() end
 
       spinner.stop()
       callback(full_response)

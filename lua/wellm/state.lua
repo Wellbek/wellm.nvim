@@ -13,10 +13,16 @@ M.data = {
   wellagent_root     = nil,   -- project_root/.wellagent
 }
 
+--- The active Session object (nil until first message is sent).
+--- Set by session.get_or_create() and used throughout for message
+--- persistence, summarization, and file-cache tracking.
+M.current_session = nil
+
 function M.reset_conversation()
   M.data.history         = {}
   M.data.system_override = nil
   M.data.current_session_id = nil
+  M.current_session      = nil
 end
 
 function M.reset_context()

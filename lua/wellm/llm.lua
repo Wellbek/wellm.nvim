@@ -301,7 +301,6 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     return
   end
 
-  local session = require("wellm.session")
   local sess = session.get_or_create()   -- ensures state.current_session exists
 
   local wellagent = require("wellm.wellagent")
@@ -317,12 +316,11 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   end
 
   local state = require("wellm.state")
-  local session = state.current_session
 
   local function start_conversation(messages, sys, tool_round)
     tool_round = tool_round or 0
-    -- Use config value; fallback to 7
-    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 7
+    -- Use config value; fallback to 30
+    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 30
     local tool_defs = require("wellm.tools").get_tool_definitions(cfg.provider)
 
     -- Reset per-round accumulator – this prevents the model seeing its own preamble
@@ -424,7 +422,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       sess:update_summary()   -- non‑blocking, cheap LLM call
 
       if cfg.sessions and cfg.sessions.save_automatically then
-        session.auto_save()
+        require("wellm.session").auto_save()
       end
 
       require("wellm.ui.spinner").stop()
@@ -446,7 +444,6 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     return
   end
 
-  local session = require("wellm.session")
   local sess = session.get_or_create()   -- ensures state.current_session exists
 
   wellagent.build_file_cache()
@@ -542,7 +539,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       sess:update_summary()   -- non‑blocking, cheap LLM call
 
       if cfg.sessions and cfg.sessions.save_automatically then
-        session.auto_save()
+        require("wellm.session").auto_save()
       end
 
       spinner.stop()

@@ -203,7 +203,7 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   table.insert(curl_cmd, "@" .. tmp)
 
   local full_content = ""
-  local tool_calls = {}
+  local tool_calls_by_id = {}   -- accumulate by id
   local usage_acc = { input_tokens = 0, output_tokens = 0 }
   local raw_lines = {}
 
@@ -214,21 +214,45 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
       for _, line in ipairs(data) do
         if line ~= "" then
           table.insert(raw_lines, line)
-          --- vim.notify("RAW: " .. line)
-          local delta, tc, used, _ = provider.parse_stream_line(line)
+          local delta, tc_fragments, used, is_done = provider.parse_stream_line(line)
           if delta and delta ~= "" then
             full_content = full_content .. delta
             vim.schedule(function() on_delta(delta) end)
           end
-          if tc then
-            for _, call in ipairs(tc) do
-              tool_calls[#tool_calls+1] = call
+          -- Accumulate tool call fragments by id
+          if tc_fragments and #tc_fragments > 0 then
+            for _, frag in ipairs(tc_fragments) do
+              local call_id = frag.id
+              if not call_id then
+                -- Some providers don't send id in every chunk; fallback to index
+                call_id = tostring(frag.index or #tool_calls_by_id + 1)
+              end
+              if not tool_calls_by_id[call_id] then
+                tool_calls_by_id[call_id] = {
+                  id = frag.id,
+                  type = frag.type or "function",
+                  func = {
+                    name = frag.func and frag.func.name or "",
+                    arguments = ""
+                  }
+                }
+              end
+              -- Append arguments chunk
+              if frag.func and frag.func.arguments then
+                tool_calls_by_id[call_id].func.arguments = tool_calls_by_id[call_id].func.arguments .. frag.func.arguments
+              end
+              -- Update name if received later (rare)
+              if frag.func and frag.func.name then
+                tool_calls_by_id[call_id].func.name = frag.func.name
+              end
             end
           end
           if used then
             if used.input_tokens then usage_acc.input_tokens = usage_acc.input_tokens + used.input_tokens end
             if used.output_tokens then usage_acc.output_tokens = usage_acc.output_tokens + used.output_tokens end
           end
+          -- When the stream ends (is_done = true), we don't have a final signal here.
+          -- We'll finalise on_exit.
         end
       end
     end,
@@ -239,7 +263,12 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
           on_done(nil, nil, nil, "curl exit " .. code)
           return
         end
-        if full_content == "" and #tool_calls == 0 then
+        -- Convert accumulated map to array
+        local final_tool_calls = {}
+        for _, call in pairs(tool_calls_by_id) do
+          table.insert(final_tool_calls, call)
+        end
+        if full_content == "" and #final_tool_calls == 0 then
           local raw = table.concat(raw_lines, "")
           vim.notify("[Wellm] Empty response, raw (first 200 chars): " .. raw:sub(1,200), vim.log.levels.WARN)
           local ok, decoded = pcall(vim.fn.json_decode, raw)
@@ -248,13 +277,13 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
             return
           end
         end
-        on_done(full_content, tool_calls, usage_acc, nil)
+        on_done(full_content, final_tool_calls, usage_acc, nil)
       end)
     end,
   })
 end
 
--- wellm/llm.lua – call_stream
+-- wellm/llm.lua – streaming call with tool use
 function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local cfg = require("wellm").config
   if not cfg.api_key or cfg.api_key == "" then
@@ -266,35 +295,34 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   local wellagent = require("wellm.wellagent")
   wellagent.build_file_cache()
 
+  -- Per-request duplicate tracker (cleared on each new user request)
+  local executed_in_this_request = {}
+
   local full_assistant_response = ""
-  local current_round_response = ""
   local function acc_delta(delta)
     full_assistant_response = full_assistant_response .. delta
-    current_round_response = current_round_response .. delta
     on_delta(delta)
   end
 
   local state = require("wellm.state")
   local session = state.current_session
 
-  -- Use session tracking if available, otherwise per‑call fallback
-  local executed_calls = {}
-  local function get_tracker()
-    if session then
-      if not session.executed_tool_calls then
-        session.executed_tool_calls = {}
-      end
-      return session.executed_tool_calls
-    end
-    return executed_calls
-  end
-
   local function start_conversation(messages, sys, tool_round)
     tool_round = tool_round or 0
-    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 15
+    -- Use config value; fallback to 7
+    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 7
     local tool_defs = require("wellm.tools").get_tool_definitions(cfg.provider)
 
-    M.raw_stream(messages, sys, acc_delta, function(content, tc, used, err)
+    -- Reset per-round accumulator – this prevents the model seeing its own preamble
+    local round_response = ""
+
+    -- Custom delta handler for this round only
+    local function round_delta(delta)
+      round_response = round_response .. delta
+      acc_delta(delta)
+    end
+
+    M.raw_stream(messages, sys, round_delta, function(content, tc, used, err)
       if used then require("wellm.usage").record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
         require("wellm.ui.spinner").stop()
@@ -303,7 +331,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         return
       end
 
-      -- If there are tool calls, execute them and continue
+      -- If there are tool calls and we haven't exceeded the limit
       if tc and #tc > 0 and tool_round < max_tool_rounds then
         -- Append assistant message with tool_calls
         local assistant_msg = {
@@ -344,13 +372,16 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           end
 
           local key = call.func.name .. ":" .. vim.json.encode(args)
-          local tracker = get_tracker()
           local result
-          if tracker[key] then
-            result = "[skipped: identical tool call already executed]"
-            vim.notify("[Wellm] Duplicate tool call skipped: " .. call.func.name, vim.log.levels.WARN)
+          if executed_in_this_request[key] then
+            result = "[ERROR: duplicate tool call detected and skipped. Do not repeat the same tool call.]"
+            vim.notify("[Wellm] Duplicate tool call skipped in same request: " .. call.func.name, vim.log.levels.WARN)
+            -- Stop further rounds immediately to break the loop
+            require("wellm.ui.spinner").stop()
+            callback("Stopped due to duplicate tool call.")
+            return
           else
-            tracker[key] = true
+            executed_in_this_request[key] = true
             result = require("wellm.tools").execute(call.func.name, args, confirm_cb)
           end
 
@@ -370,10 +401,10 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         vim.notify("[Wellm] Max tool rounds reached (" .. max_tool_rounds .. "), stopping.", vim.log.levels.WARN)
       end
 
-      -- Final answer: strip pre‑tool reasoning
+      -- Final answer: strip pre‑tool reasoning preamble
       local clean_response = clean_assistant_content(full_assistant_response, tool_round > 0)
 
-      -- Save to history (only final user/assistant pairs, not intermediate tool calls)
+      -- Save to history (only final user/assistant pairs)
       local last_msg = state.data.history[#state.data.history]
       if not last_msg or last_msg.role ~= "user" or last_msg.content ~= user_text then
         table.insert(state.data.history, { role = "user", content = user_text })
@@ -385,7 +416,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       end
 
       require("wellm.ui.spinner").stop()
-      callback(current_round_response)
+      callback(clean_response)   -- return cleaned content, not the raw accumulated one
     end, tool_defs)
   end
 
@@ -411,7 +442,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
   local function attempt(messages, sys, tool_round)
     tool_round = tool_round or 0
-    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 5
+    local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 7
     local tool_defs = tools.get_tool_definitions(cfg.provider)
 
     M.raw_call(messages, sys, function(content, tc, used, err)

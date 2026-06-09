@@ -12,6 +12,7 @@ end
 ---@param str string
 ---@return string
 function M.hash_string(str)
+  if not str then return "" end
   return fnv1a(str)
 end
 

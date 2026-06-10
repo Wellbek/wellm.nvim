@@ -31,6 +31,7 @@ function Session.new(opts)
     system_prompt = opts.system_prompt,
     file_cache    = opts.file_cache or {},
     read_files    = opts.read_files or {},               -- path -> { hash, turn }
+    previous_file_content = opts.previous_file_content or {},
     executed_tool_calls = opts.executed_tool_calls or {},-- key -> true
     summary       = opts.summary or "",                  -- rolling summary of earlier conversation
     user_intent   = opts.user_intent or "",              -- high-level description of what the user wants

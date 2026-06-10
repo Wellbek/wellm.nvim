@@ -67,6 +67,7 @@ function Session:to_table()
     system_prompt = self.system_prompt,
     file_cache    = self.file_cache,
     read_files    = self.read_files,
+    previous_file_content = self.previous_file_content,
     summary       = self.summary,
     user_intent   = self.user_intent,
     intent_history = self.intent_history,
@@ -85,6 +86,7 @@ function Session.from_table(t)
     system_prompt = t.system_prompt,
     file_cache    = t.file_cache or {},
     read_files    = t.read_files or {},
+    previous_file_content = t.previous_file_content or {},
     summary       = t.summary or "",
     user_intent   = t.user_intent or "",
     intent_history = t.intent_history or {},
@@ -107,6 +109,29 @@ function Session:validate_file_cache()
       end
     end
   end
+end
+
+-- Store a snapshot of a file's content for diff generation
+function Session:store_file_snapshot(path, content, hash)
+  if not content then return end
+  hash = hash or hash_util.hash_string(content)
+  self.previous_file_content[path] = {
+    content = content,
+    hash = hash,
+    turn = #self.messages,
+  }
+end
+
+-- Get diff since last snapshot for a file (returns nil if unchanged or no snapshot)
+function Session:get_diff_since_last_snapshot(path)
+  local prev = self.previous_file_content[path]
+  if not prev then return nil end
+  local current_hash, current_content = hash_util.hash_file(path)
+  if not current_content then return nil end
+  if current_hash == prev.hash then return nil end
+  local diff = require("wellm.diff").unified_diff(prev.content, current_content)
+  if diff == "" then return nil end
+  return diff
 end
 
 function M.new_id()

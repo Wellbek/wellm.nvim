@@ -2,6 +2,7 @@
 -- Manages M.state.data.context_files: add, remove, clear.
 local hash_util = require("wellm.util.hash")
 local state     = require("wellm.state")
+local symbols   = require("wellm.symbols")   -- new
 
 local M = {}
 
@@ -64,6 +65,41 @@ function M.inject_file(messages, path, turn_index)
   end
 end
 
+--- New: inject only the symbol outline of a file (much cheaper).
+function M.inject_file_outline(messages, path, turn_index)
+  turn_index = turn_index or 0
+  local session = state.current_session
+  local cache = session and session.file_cache or {}
+  local current_hash, content = hash_util.hash_file(path)
+  if not current_hash or not content then
+    table.insert(messages, { role = "user", content = string.format("<file path=\"%s\">[unreadable]</file>", path) })
+    return
+  end
+  
+  local outline = symbols.build_outline(path, content)
+  local cache_key = path .. ":outline"
+  local cached = cache[cache_key]
+  
+  if not cached then
+    cache[cache_key] = { hash = current_hash, turn = turn_index }
+    table.insert(messages, {
+      role = "user",
+      content = string.format("<file_outline path=\"%s\">\n%s\n</file_outline>", path, outline)
+    })
+  elseif cached.hash == current_hash then
+    table.insert(messages, {
+      role = "user",
+      content = string.format("<file_outline_ref path=\"%s\" status=\"unchanged\" since_turn=\"%d\" />", path, cached.turn)
+    })
+  else
+    cache[cache_key] = { hash = current_hash, turn = turn_index }
+    table.insert(messages, {
+      role = "user",
+      content = string.format("<file_outline path=\"%s\" status=\"changed\">\n%s\n</file_outline>", path, outline)
+    })
+  end
+end
+
 ---@param messages table
 ---@param path string
 ---@param start_line number
@@ -118,44 +154,32 @@ end
 -- Per-session chunk cache (keyed by path)
 local chunk_cache = {}
 
+--- Modified: now uses outline injection for smart mode.
 ---@param path string
 ---@param query string|nil Optional query for relevance scoring
 function M.add_file_smart(path, query)
-  if not chunk_cache[path] then
-    -- populate chunk_cache[path].chunks from file on first call
-    local _, content = hash_util.hash_file(path)
-    if not content then return end
-    -- simple chunking: one chunk per top-level block (fallback: whole file)
-    chunk_cache[path] = { chunks = {{ content = content, start_line = 1, end_line = 0 }} }
-  end
-
-  local cached = chunk_cache[path]
+  if not path or path == "" then return end
+  local _, content = hash_util.hash_file(path)
+  if not content then return end
 
   if not query or query == "" then
-    -- no query: add all chunks (fallback)
-    for _, ch in ipairs(cached.chunks) do
-      M.add_file_chunks(path, nil, nil, ch.content, ch.start_line, ch.end_line)
-    end
+    -- No query: fallback to whole file injection (for backward compatibility)
+    M.add_file_chunks(path, nil, nil, content, 1, 0)
     return
   end
-  -- Score chunks: simple keyword overlap on first line (function sig, heading)
-  local scored = {}
-  for _, ch in ipairs(cached.chunks) do
-    local first_line = ch.content:match("^[^\n]*") or ""
-    local score = 0
-    for word in query:gmatch("%w+") do
-      if first_line:lower():match(word:lower()) then
-        score = score + 1
-      end
-    end
-    table.insert(scored, { chunk = ch, score = score })
-  end
 
-  table.sort(scored, function(a, b) return a.score > b.score end)
-  for i = 1, math.min(3, #scored) do
-    local ch = scored[i].chunk
-    M.add_file_chunks(path, nil, nil, ch.content, ch.start_line, ch.end_line)
-  end
+  -- Smart mode: inject outline instead of whole file
+  local key = path .. ":outline"
+  if state.data.context_files[key] then return end
+  state.data.context_files[key] = {
+    content = symbols.build_outline(path, content),
+    path = path,
+    is_outline = true,
+    full_content = content,   -- kept for possible later expansion
+    ttl = (require("wellm").config.context and require("wellm").config.context.item_ttl) or 1,
+    persistent = false,
+  }
+  vim.notify("[Wellm] Added outline for: " .. vim.fn.fnamemodify(path, ":~:."))
 end
 
 ---@param session table Current session object
@@ -165,7 +189,14 @@ function M.inject_contexts(session, messages, contexts)
   local turn_index = #session.messages
   for _, ctx in ipairs(contexts) do
     if ctx.type == "file" then
-      M.inject_file(messages, ctx.path, turn_index)
+      -- Check if we have an outline version of this file in context
+      local outline_key = ctx.path .. ":outline"
+      local context_item = state.data.context_files[outline_key] or state.data.context_files[ctx.path]
+      if context_item and context_item.is_outline then
+        M.inject_file_outline(messages, ctx.path, turn_index)
+      else
+        M.inject_file(messages, ctx.path, turn_index)
+      end
     elseif ctx.type == "visual" then
       M.inject_visual_selection(messages, ctx.path, ctx.start_line, ctx.end_line, ctx.content, turn_index)
     elseif ctx.type == "message" then
@@ -189,21 +220,21 @@ function M.add_file_chunks(path, start_line, end_line, content, auto_detect_star
     " lines " .. (start_line or "?") .. "-" .. (end_line or "?"))
 end
 
---- Add a single file to context (kept for compatibility, but prefers chunking)
+--- Add a single file to context (kept for compatibility, but prefers outline for smart mode).
 function M.add_file(path)
   path = path or vim.fn.expand("%:p")
   if not path or path == "" or vim.fn.filereadable(path) == 0 then
     vim.notify("[Wellm] Cannot read: " .. tostring(path), vim.log.levels.WARN)
     return false
   end
-  M.add_file_smart(path, nil) -- fallback: add all chunks
+  M.add_file_smart(path, nil) -- no query → whole file
   return true
 end
 
 --- Remove a file or chunk from context.
 function M.remove_file(path)
   for k, _ in pairs(state.data.context_files) do
-    if k:match("^" .. vim.pesc(path) .. ":") or k == path then
+    if k:match("^" .. vim.pesc(path) .. ":") or k == path or k == path .. ":outline" then
       state.data.context_files[k] = nil
     end
   end
@@ -252,6 +283,7 @@ function M.build_block()
       if item.start_line and item.end_line then
         label = label .. " (lines " .. item.start_line .. "-" .. item.end_line .. ")"
       end
+      if item.is_outline then label = label .. " (outline)" end
     end
     table.insert(parts, string.format("### File: %s\n```\n%s\n```", label, content))
   end

@@ -5,10 +5,10 @@
 local M = {}
 
 -- Tree-sitter queries per language (basic, extend as needed)
+-- These queries are tested against Neovim's built-in parsers.
 local queries = {
   lua = [[
     (function_declaration name: (identifier) @name) @func
-    (local_function name: (identifier) @name) @func
     (assignment_statement
       left: (variable_list (identifier) @var)
       right: (function_definition) @func)
@@ -47,6 +47,15 @@ local queries = {
   ]],
 }
 
+-- Helper to safely parse a query (returns nil on error)
+local function safe_parse_query(lang, query_str)
+  local ok, parser = pcall(vim.treesitter.query.parse, lang, query_str)
+  if not ok then
+    return nil
+  end
+  return parser
+end
+
 -- Regex fallback (language‑agnostic)
 local function regex_extract(content)
   local symbols = {}
@@ -70,7 +79,6 @@ local function regex_extract(content)
   for name in content:gmatch("^(%w+)%s*=") do
     table.insert(symbols, name)
   end
-  -- module.exports = { ... } -> not captured well, but fine
   return symbols
 end
 
@@ -83,21 +91,23 @@ function M.extract_symbols(path, content)
   local symbols = {}
   
   -- Try tree-sitter first
-  local parser = vim.treesitter.get_parser(0, lang)
-  if parser and parser:parse() then
+  local ok, parser = pcall(vim.treesitter.get_parser, 0, lang)
+  if ok and parser then
     local tree = parser:parse()[1]
     if tree then
       local query_str = queries[lang]
       if query_str then
-        local query = vim.treesitter.query.parse(lang, query_str)
-        for id, node in query:iter_captures(tree:root(), 0) do
-          local name = vim.treesitter.get_node_text(node, 0)
-          if name then
-            local cap = query.captures[id]
-            if cap == "func" then table.insert(symbols, name .. "()")
-            elseif cap == "class" then table.insert(symbols, "class " .. name)
-            elseif cap == "var" then table.insert(symbols, name)
-            elseif cap == "call" then table.insert(symbols, name .. "() (call)")
+        local query = safe_parse_query(lang, query_str)
+        if query then
+          for id, node in query:iter_captures(tree:root(), 0) do
+            local name = vim.treesitter.get_node_text(node, 0)
+            if name then
+              local cap = query.captures[id]
+              if cap == "func" then table.insert(symbols, name .. "()")
+              elseif cap == "class" then table.insert(symbols, "class " .. name)
+              elseif cap == "var" then table.insert(symbols, name)
+              elseif cap == "call" then table.insert(symbols, name .. "() (call)")
+              end
             end
           end
         end
@@ -105,7 +115,7 @@ function M.extract_symbols(path, content)
     end
   end
   
-  -- Fallback to regex
+  -- Fallback to regex if tree‑sitter gave nothing
   if #symbols == 0 then
     symbols = regex_extract(content)
   end

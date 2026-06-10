@@ -56,8 +56,11 @@ local function safe_parse_query(lang, query_str)
   return parser
 end
 
--- Regex fallback (language‑agnostic)
+-- Regex fallback (language‑agnostic) – expects content to be a non‑nil string
 local function regex_extract(content)
+  if not content or content == "" then
+    return {}
+  end
   local symbols = {}
   -- function name(
   for name in content:gmatch("function%s+(%w+)[%s]*%(") do
@@ -84,9 +87,13 @@ end
 
 --- Extract symbols from file content.
 --- @param path string (for filetype detection)
---- @param content string
+--- @param content string|nil
 --- @return table { symbols = string[], language = string }
 function M.extract_symbols(path, content)
+  if not content or content == "" then
+    return { symbols = {}, language = vim.filetype.match({ filename = path }) or "unknown" }
+  end
+
   local lang = vim.filetype.match({ filename = path }) or "lua"
   local symbols = {}
   
@@ -135,10 +142,13 @@ end
 
 --- Build a human‑readable outline (e.g., for injection into context).
 --- @param path string
---- @param content string
+--- @param content string|nil
 --- @param max_symbols number|nil (default 50)
 --- @return string
 function M.build_outline(path, content, max_symbols)
+  if not content or content == "" then
+    return "-- " .. path .. " (empty or unreadable)\n  [no symbols]"
+  end
   max_symbols = max_symbols or 50
   local extracted = M.extract_symbols(path, content)
   local syms = extracted.symbols

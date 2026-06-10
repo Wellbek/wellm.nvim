@@ -89,7 +89,7 @@ After changes, add a line: [DECISION: summary]=]],
     - Each assistant message should contain EITHER tool calls OR a brief final answer, not a mix of thinking and action.
 
     ## Token budget awareness
-    You have approximately 150k tokens of context remaining (out of 200k). Be concise.
+    You have approximately 250k tokens of context remaining (out of 300k). Be concise.
 
     ## When you must write prose
     - Provide a short summary only after all tool calls for a given task are complete.
@@ -101,12 +101,12 @@ After changes, add a line: [DECISION: summary]=]],
     - If a tool returns a warning about duplication, try a different approach.
 
     Now follow the user's instruction.
-    ]]
+    ]],
 
     orient = [[Analyse this software project and produce two markdown sections.
 
 ## OVERVIEW
-  Summary (800 worssds max):
+  Summary (800 words max):
   - What the project does
   - Main language(s) and frameworks
   - Key architectural patterns

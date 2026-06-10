@@ -131,14 +131,16 @@ local function clean_assistant_content(content, had_tool_calls)
   return vim.trim(stripped or trimmed)
 end
 
--- Duplicate tool-call detection: returns true if the exact same (name, args)
--- pair has already been executed this session. Catches the model looping on
--- read_file / edit_file with identical arguments.
-local function is_duplicate_tool_call(call, executed)
-  local key = call.func.name .. ":" .. vim.json.encode(call.func.arguments)
-  if executed[key] then return true end
+-- Duplicate tool-call detection: returns (is_duplicate, key).
+-- If the (name, args) pair has already been executed, is_duplicate=true.
+-- The key is always returned so the caller can count duplicates.
+local function check_duplicate_tool_call(call, executed)
+  local args = call.func.arguments
+  if type(args) == "table" then args = vim.json.encode(args) end
+  local key = call.func.name .. ":" .. vim.json.encode(args)
+  if executed[key] then return true, key end
   executed[key] = true
-  return false
+  return false, key
 end
 
 -- Raw non‑streaming call with tool definitions
@@ -308,10 +310,26 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
   -- Per-request duplicate tracker (cleared on each new user request)
   local executed_in_this_request = {}
+  local duplicate_count        = 0
+  local duplicate_tolerance    = (cfg.llm and cfg.llm.duplicate_tolerance) or 5
+  local save_interval          = (cfg.llm and cfg.llm.save_interval_chars) or 2000
+  local chars_since_last_save  = 0
 
   local full_assistant_response = ""
   local function acc_delta(delta)
     full_assistant_response = full_assistant_response .. delta
+    chars_since_last_save = chars_since_last_save + #delta
+    -- Periodically update the assistant message in session and save
+    if chars_since_last_save >= save_interval then
+      chars_since_last_save = 0
+      local last_msg = sess.messages[#sess.messages]
+      if last_msg and last_msg.role == "assistant" then
+        last_msg.content = full_assistant_response
+      end
+      if cfg.sessions and cfg.sessions.save_automatically then
+        session.auto_save()
+      end
+    end
     on_delta(delta)
   end
 
@@ -335,6 +353,14 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     M.raw_stream(messages, sys, round_delta, function(content, tc, used, err)
       if used then require("wellm.usage").record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
+        -- Save session even on error so no conversation data is lost
+        local last_msg = sess.messages[#sess.messages]
+        if last_msg and last_msg.role == "assistant" then
+          last_msg.content = full_assistant_response ~= "" and full_assistant_response or "[Error: " .. tostring(err) .. "]"
+        end
+        if cfg.sessions and cfg.sessions.save_automatically then
+          session.auto_save()
+        end
         require("wellm.ui.spinner").stop()
         vim.notify("API Error: " .. tostring(err), vim.log.levels.ERROR)
         callback(nil)
@@ -384,12 +410,25 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           local key = call.func.name .. ":" .. vim.json.encode(args)
           local result
           if executed_in_this_request[key] then
-            result = "[ERROR: duplicate tool call detected and skipped. Do not repeat the same tool call.]"
-            vim.notify("[Wellm] Duplicate tool call skipped in same request: " .. call.func.name, vim.log.levels.WARN)
-            -- Stop further rounds immediately to break the loop
-            require("wellm.ui.spinner").stop()
-            callback("Stopped due to duplicate tool call.")
-            return
+            duplicate_count = duplicate_count + 1
+            if duplicate_count >= duplicate_tolerance then
+              -- Tolerance exceeded: save session and stop
+              result = "[ERROR: duplicate tool call tolerance exceeded. Stopping.]"
+              vim.notify("[Wellm] Duplicate tool call tolerance (" .. duplicate_tolerance .. ") exceeded, stopping.", vim.log.levels.WARN)
+              local last_msg = sess.messages[#sess.messages]
+              if last_msg and last_msg.role == "assistant" then
+                last_msg.content = full_assistant_response ~= "" and full_assistant_response or "[Stopped: duplicate tool call tolerance exceeded]"
+              end
+              if cfg.sessions and cfg.sessions.save_automatically then
+                session.auto_save()
+              end
+              require("wellm.ui.spinner").stop()
+              callback("Stopped due to duplicate tool call tolerance exceeded.")
+              return
+            else
+              result = "[WARNING: duplicate tool call skipped (" .. duplicate_count .. "/" .. duplicate_tolerance .. "). Try a different approach.]"
+              vim.notify("[Wellm] Duplicate tool call skipped (" .. duplicate_count .. "/" .. duplicate_tolerance .. "): " .. call.func.name, vim.log.levels.WARN)
+            end
           else
             executed_in_this_request[key] = true
             result = require("wellm.tools").execute(call.func.name, args, confirm_cb)
@@ -414,15 +453,15 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       -- Final answer: strip pre‑tool reasoning preamble
       local clean_response = clean_assistant_content(full_assistant_response, tool_round > 0)
 
-      -- Save to session (not directly to state.data.history)
-      sess:add_message("user", user_text)
-      sess:update_user_intent(user_text)
-
-      sess:add_message("assistant", clean_response)
+      -- Update the placeholder assistant message (already added at stream start)
+      local last_msg = sess.messages[#sess.messages]
+      if last_msg and last_msg.role == "assistant" then
+        last_msg.content = clean_response
+      end
       sess:update_summary()   -- non‑blocking, cheap LLM call
 
       if cfg.sessions and cfg.sessions.save_automatically then
-        require("wellm.session").auto_save()
+        session.auto_save()
       end
 
       require("wellm.ui.spinner").stop()
@@ -431,6 +470,18 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
+
+  -- Save user message to session immediately (preserves input if streaming crashes).
+  -- This MUST happen after build_payload, since build_payload reads from the session
+  -- and also appends the user text to the messages array for the LLM.
+  sess:add_message("user", user_text)
+  sess:update_user_intent(user_text)
+  -- Add placeholder assistant message that will be updated during streaming
+  sess:add_message("assistant", "")
+  if cfg.sessions and cfg.sessions.save_automatically then
+    session.auto_save()
+  end
+
   require("wellm.ui.spinner").start("LLM thinking...")
   start_conversation(messages, sys, 0)
 end
@@ -451,6 +502,8 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   local full_response = ""
   local tool_calls = {}
   local executed_calls = {}
+  local duplicate_count = 0
+  local duplicate_tolerance = (cfg.llm and cfg.llm.duplicate_tolerance) or 5
 
   local function attempt(messages, sys, tool_round)
     tool_round = tool_round or 0
@@ -460,11 +513,27 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     M.raw_call(messages, sys, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
+        -- Save session even on error
+        local last_msg = sess.messages[#sess.messages]
+        if last_msg and last_msg.role == "assistant" then
+          last_msg.content = full_response ~= "" and full_response or "[Error: " .. tostring(err) .. "]"
+        end
+        if cfg.sessions and cfg.sessions.save_automatically then
+          session.auto_save()
+        end
         spinner.stop()
         callback("> [!] API Error: " .. tostring(err))
         return
       end
       if not content and (not tc or #tc == 0) then
+        -- Save session even on empty response
+        local last_msg = sess.messages[#sess.messages]
+        if last_msg and last_msg.role == "assistant" then
+          last_msg.content = "[Empty response]"
+        end
+        if cfg.sessions and cfg.sessions.save_automatically then
+          session.auto_save()
+        end
         spinner.stop()
         callback("> [!] Empty response")
         return
@@ -509,9 +578,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
           end
 
           local result
-          if is_duplicate_tool_call(call, executed_calls) then
-            result = "[skipped: identical call already executed this turn]"
-            vim.notify("[Wellm] Duplicate tool call skipped: " .. call.func.name, vim.log.levels.WARN)
+          local is_dup, _ = check_duplicate_tool_call(call, executed_calls)
+          if is_dup then
+            duplicate_count = duplicate_count + 1
+            if duplicate_count >= duplicate_tolerance then
+              result = "[ERROR: duplicate tool call tolerance exceeded. Stopping.]"
+              vim.notify("[Wellm] Duplicate tool call tolerance (" .. duplicate_tolerance .. ") exceeded, stopping.", vim.log.levels.WARN)
+            else
+              result = "[WARNING: duplicate tool call skipped (" .. duplicate_count .. "/" .. duplicate_tolerance .. "). Try a different approach.]"
+              vim.notify("[Wellm] Duplicate tool call skipped (" .. duplicate_count .. "/" .. duplicate_tolerance .. "): " .. call.func.name, vim.log.levels.WARN)
+            end
           else
             result = tools.execute(call.func.name, args, confirm_cb)
           end
@@ -519,8 +595,13 @@ function M.call(user_text, mode, callback, extra_file_ctx)
           table.insert(messages, { role = "tool", tool_call_id = call.id, content = result })
         end
 
-        attempt(messages, sys, tool_round + 1)
-        return
+        -- Stop further rounds if duplicate tolerance exceeded
+        if duplicate_count >= duplicate_tolerance then
+          -- Fall through to final answer handling (which saves the session)
+        else
+          attempt(messages, sys, tool_round + 1)
+          return
+        end
       end
 
       -- No tool calls or max rounds reached
@@ -531,15 +612,15 @@ function M.call(user_text, mode, callback, extra_file_ctx)
       local had_tools = tool_round > 0
       local clean_response = clean_assistant_content(full_response, had_tools)
 
-      -- Save to session (not directly to state.data.history)
-      sess:add_message("user", user_text)
-      sess:update_user_intent(user_text)
-
-      sess:add_message("assistant", clean_response)
+      -- Update the placeholder assistant message (already added at call start)
+      local last_msg = sess.messages[#sess.messages]
+      if last_msg and last_msg.role == "assistant" then
+        last_msg.content = clean_response
+      end
       sess:update_summary()   -- non‑blocking, cheap LLM call
 
       if cfg.sessions and cfg.sessions.save_automatically then
-        require("wellm.session").auto_save()
+        session.auto_save()
       end
 
       spinner.stop()
@@ -548,6 +629,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
+
+  -- Save user message to session immediately (preserves input if call crashes).
+  -- This MUST happen after build_payload for the same reason as in call_stream.
+  sess:add_message("user", user_text)
+  sess:update_user_intent(user_text)
+  sess:add_message("assistant", "")
+  if cfg.sessions and cfg.sessions.save_automatically then
+    session.auto_save()
+  end
+
   spinner.start("LLM thinking...")
   attempt(messages, sys, 0)
 end

@@ -66,8 +66,10 @@ M.defaults = {
   },
 
   llm = {
-    output_reserve  = 2048,
-    max_tool_rounds = 30,     -- hard cap on tool call loops per request
+    output_reserve       = 2048,
+    max_tool_rounds      = 30,     -- hard cap on tool call loops per request
+    duplicate_tolerance  = 5,      -- allow this many duplicate tool calls before stopping
+    save_interval_chars  = 2000,   -- auto-save session every N characters during streaming
   },
 
   prompts = {

@@ -136,8 +136,11 @@ end
 -- The key is always returned so the caller can count duplicates.
 local function check_duplicate_tool_call(call, executed)
   local args = call.func.arguments
-  if type(args) == "table" then args = vim.json.encode(args) end
-  local key = call.func.name .. ":" .. vim.json.encode(args)
+  if type(args) == "table" then
+    args = vim.json.encode(args)
+  end
+  -- args is now always a string; don't double-encode
+  local key = call.func.name .. ":" .. args
   if executed[key] then return true, key end
   executed[key] = true
   return false, key
@@ -248,9 +251,13 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
                   }
                 }
               end
-              -- Append arguments chunk
+              -- Append arguments chunk (always normalize to string)
               if frag.func and frag.func.arguments then
-                tool_calls_by_id[call_id].func.arguments = tool_calls_by_id[call_id].func.arguments .. frag.func.arguments
+                local chunk = frag.func.arguments
+                if type(chunk) == "table" then
+                  chunk = vim.json.encode(chunk)
+                end
+                tool_calls_by_id[call_id].func.arguments = tool_calls_by_id[call_id].func.arguments .. chunk
               end
               -- Update name if received later (rare)
               if frag.func and frag.func.name then
@@ -376,12 +383,17 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           tool_calls = {},
         }
         for _, call in ipairs(tc) do
+          local args = call.func.arguments
+          -- Ensure arguments is a JSON string for the API
+          if type(args) == "table" then
+            args = vim.json.encode(args)
+          end
           table.insert(assistant_msg.tool_calls, {
             id = call.id,
             type = "function",
             ["function"] = {
               name = call.func.name,
-              arguments = call.func.arguments,
+              arguments = args,
             }
           })
         end
@@ -403,8 +415,16 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
         -- Execute each tool call and append tool_result
         for _, call in ipairs(tc) do
           local args = call.func.arguments
+          if type(args) == "table" then
+            args = vim.json.encode(args)
+          end
           if type(args) == "string" then
-            args = vim.json.decode(args)
+            local ok, decoded = pcall(vim.json.decode, args)
+            if ok then
+              args = decoded
+            else
+              vim.notify("[Wellm] Failed to decode tool arguments: " .. tostring(args), vim.log.levels.WARN)
+            end
           end
 
           local key = call.func.name .. ":" .. vim.json.encode(args)
@@ -550,12 +570,16 @@ function M.call(user_text, mode, callback, extra_file_ctx)
         }
 
         for _, call in ipairs(tc) do
+            local args = call.func.arguments
+            if type(args) == "table" then
+              args = vim.json.encode(args)
+            end
             table.insert(assistant_msg.tool_calls, {
                 id = call.id,
                 type = "function",
                 ["function"] = {
                     name = call.func.name,
-                    arguments = call.func.arguments,
+                    arguments = args,
                 }
             })
         end
@@ -574,7 +598,13 @@ function M.call(user_text, mode, callback, extra_file_ctx)
         for _, call in ipairs(tool_calls) do
           local args = call.func.arguments
           if type(args) == "string" then
-            args = vim.json.decode(args)
+            local ok, decoded = pcall(vim.json.decode, args)
+            if ok then
+              args = decoded
+            else
+              -- Malformed JSON – pass the raw string so the tool can report the error
+              vim.notify("[Wellm] Failed to decode tool arguments: " .. tostring(args), vim.log.levels.WARN)
+            end
           end
 
           local result

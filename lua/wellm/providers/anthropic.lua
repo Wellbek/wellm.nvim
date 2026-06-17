@@ -48,7 +48,36 @@ function M.parse_stream_line(line)
   if dec.type == "content_block_start"
       and dec.content_block
       and dec.content_block.type == "tool_use" then
-    return nil, nil, nil, false
+    -- Emit a tool call fragment with id and name (arguments come in delta chunks)
+    local args = dec.content_block.input
+    if type(args) == "table" then
+      args = vim.json.encode(args)
+    elseif args == nil then
+      args = ""
+    end
+    return nil, {{
+      id = dec.content_block.id,
+      type = "function",
+      func = {
+        name = dec.content_block.name or "",
+        arguments = args,
+      }
+    }}, nil, false
+  end
+
+  if dec.type == "content_block_delta"
+      and dec.delta
+      and dec.delta.type == "input_json_delta" then
+    -- Partial arguments for a tool call (same index as the content_block_start)
+    local partial = dec.delta.partial_json or ""
+    return nil, {{
+      id = nil,  -- no id in delta chunks; llm.lua will accumulate by index
+      type = "function",
+      func = {
+        name = "",
+        arguments = partial,
+      }
+    }}, nil, false
   end
 
   if dec.type == "message_delta" and dec.usage then
@@ -81,9 +110,17 @@ function M.parse_response(decoded)
         id = block.id,
         type = "function",
       }
+      -- Anthropic returns input as a parsed table; normalize to JSON string
+      -- so downstream code (llm.lua) has a consistent format.
+      local args = block.input
+      if type(args) == "table" then
+        args = vim.json.encode(args)
+      elseif args == nil then
+        args = ""
+      end
       call["func"] = {
         name = block.name,
-        arguments = block.input,
+        arguments = args,
       }
       table.insert(tool_calls, call)
     end

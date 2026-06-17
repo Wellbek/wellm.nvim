@@ -71,12 +71,21 @@ function M.parse_stream_line(line)
         tool_calls = {}
 
         for _, tc in ipairs(delta.tool_calls) do
+          local args = tc["function"] and tc["function"].arguments
+          -- Normalize: arguments MUST be a string for OpenAI‑compatible APIs.
+          -- Some models (e.g. GLM 5.1) return arguments as a JSON object.
+          if type(args) == "table" then
+            args = vim.json.encode(args)
+          elseif args == nil then
+            args = ""
+          end
           table.insert(tool_calls, {
             id = tc.id,
+            index = tc.index,
             type = "function",
             func = {
-              name = tc["function"].name,
-              arguments = tc["function"].arguments,
+              name = tc["function"] and tc["function"].name or "",
+              arguments = args,
             }
           })
         end
@@ -120,13 +129,20 @@ function M.parse_response(decoded)
       content = message.content or message.reasoning_content or ""
       if message.tool_calls then
         for _, tc in ipairs(message.tool_calls) do
+          local args = tc["function"] and tc["function"].arguments
+          -- Normalize: arguments MUST be a string for OpenAI‑compatible APIs.
+          if type(args) == "table" then
+            args = vim.json.encode(args)
+          elseif args == nil then
+            args = ""
+          end
           local call = {
             id = tc.id,
             type = "function",
           }
           call["func"] = {
-            name = tc["function"].name,
-            arguments = tc["function"].arguments,
+            name = tc["function"] and tc["function"].name or "",
+            arguments = args,
           }
           table.insert(tool_calls, call)
         end

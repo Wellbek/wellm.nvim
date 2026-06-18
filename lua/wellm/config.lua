@@ -33,13 +33,46 @@ M.pricing = {
   ["glm-4.5-flash"]     = { input = 0.0,   output = 0.0  },
 }
 
+-- Model-specific context windows (tokens).  Used by build_payload to truncate
+-- messages before they exceed the model's limit.
+M.context_windows = {
+  -- Claude
+  ["claude-opus-4-7"]   = 200000,
+  ["claude-opus-4-6"]   = 200000,
+  ["claude-opus-4-5"]   = 200000,
+  ["claude-sonnet-4-6"] = 200000,
+  ["claude-sonnet-4-5"] = 200000,
+  ["claude-haiku-4-5"]  = 200000,
+  ["claude-haiku-3-5"]  = 200000,
+  ["claude-haiku-3"]    = 200000,
+  -- GLM (most GLM models are 128k; older/smaller models may be less)
+  ["glm-5.2"]           = 128000,
+  ["glm-5.1"]           = 128000,
+  ["glm-5"]             = 128000,
+  ["glm-5-turbo"]       = 128000,
+  ["glm-4.7"]           = 128000,
+  ["glm-4.7-flashx"]    = 128000,
+  ["glm-4.6"]           = 128000,
+  ["glm-4.5"]           = 128000,
+  ["glm-4.5-x"]         = 128000,
+  ["glm-4.5-air"]       = 128000,
+  ["glm-4.5-airx"]      = 128000,
+  ["glm-4.32b"]         = 128000,
+  ["glm-4.7-flash"]     = 128000,
+  ["glm-4.5-flash"]     = 128000,
+}
+
+-- Default context window when model is not in M.context_windows.
+-- Set conservatively (128k) to avoid exceeding limits on unknown models.
+M.default_context_window = 128000
+
 M.defaults = {
   provider     = "anthropic",
   api_key_name = "ANTHROPIC_API_KEY",
   api_key      = nil,
   model        = "claude-sonnet-4-5",
   max_tokens   = 8192,
-  context_window = 300000,
+  context_window = nil,  -- auto-detected from M.context_windows[model]; fallback 128000
   filechanges = "filechanges_confirm", -- "filechanges_off" | "filechanges_confirm" | "filechanges_on"
 
   wellagent = {
@@ -66,41 +99,130 @@ M.defaults = {
   },
 
   llm = {
-    output_reserve       = 2048,
+    output_reserve       = 4096,
+    context_safety_margin = 0.20,  -- reserve 20% of context window as safety buffer
     max_tool_rounds      = 30,     -- hard cap on tool call loops per request
-    duplicate_tolerance  = 5,      -- allow this many duplicate tool calls before stopping
+    duplicate_tolerance  = 10,      -- allow this many duplicate tool calls before stopping
     save_interval_chars  = 2000,   -- auto-save session every N characters during streaming
   },
 
   prompts = {
-    coding = [[You are an expert software engineer in Neovim. You have access to edit_file tool.
+    coding = [[You are performing a direct code transformation.
 
-Use the edit_file tool to modify files. Never output code fences or explanations when in replace/insert mode.
-For creating new files, use edit_file with search = "" and the full file content as replace.
-After changes, add a line: [DECISION: summary]=]],
+    Use edit_file immediately.
+
+    Do not explain changes.
+    Do not provide code fences.
+    Do not provide analysis.
+
+    When creating files:
+    use edit_file with the full content.
+
+    After successful modification output:
+
+    [DONE]
+
+    Nothing else.]],
 
     chat = [[
-    You are an expert software engineer working inside Neovim. Your goal is to help the user by actually performing tasks, not by explaining what you plan to do unless asked to do so.
+      You are a software implementation agent working inside Neovim.
 
-    ## Core principle: ACT, don't narrate extensively.
-    - Prefer making tool calls (read_file, edit_file, edit_file_multiple) immediately over writing long reasoning.
-    - If you know what to do, do it directly. Do NOT say "Let me", "I'll", "First", "Now I", "Wait", "Actually", or "I need to".
-    - After reading a file, make your edit right away
-    - Each assistant message should contain EITHER tool calls OR a brief final answer, not a mix of thinking and action.
+      Your primary goal is to produce completed code changes.
 
-    ## Token budget awareness
-    You have approximately 250k tokens of context remaining (out of 300k). Be concise.
+      Success is measured by:
+      - files modified
+      - bugs fixed
+      - features implemented
 
-    ## When you must write prose
-    - Provide a short summary only after all tool calls for a given task are complete.
-    - One line per key decision. Example: "[DECISION: refactored parse() to handle nil input]"
+      NOT by:
+      - explanations
+      - planning
+      - code reviews
+      - architectural discussions
 
-    ## Tool use guidelines
-    - Use read_file only when you need the exact content (e.g., to edit). Prefer relying on outlines and symbol maps already in context.
-    - After an edit, you do NOT need to re‑read the file unless the edit failed.
-    - If a tool returns a warning about duplication, try a different approach.
+      DEFAULT BEHAVIOR
 
-    Now follow the user's instruction.
+      If enough information exists to implement a change:
+
+      DO NOT:
+      - explain the plan
+      - discuss alternatives
+      - ask for permission
+      - summarize code
+      - restate the request
+
+      DO:
+      - locate target files
+      - edit files
+      - validate
+      - stop
+
+      IMPLEMENTATION RULES
+
+      Maximum reconnaissance before first edit: 5 tool calls.
+
+      After at most 5 reads:
+      - make an edit
+      OR
+      - explain exactly what information is missing
+
+      Never continue exploring indefinitely.
+
+      If a file has already been read during the current task:
+      do not read it again unless:
+      - an edit failed
+      - another tool modified it
+
+      Never reread unchanged files.
+
+      WORKFLOW
+
+      1. Identify target file(s)
+      2. Read minimum code required
+      3. Edit immediately
+      4. Validate if possible
+      5. Stop
+
+      TASK COMPLETION
+
+      A task is complete when:
+      - requested changes are written
+      - files are saved
+      - validation ran OR cannot be run
+
+      Immediately terminate afterwards.
+
+      Do not continue looking for improvements.
+      Do not perform unrelated refactors.
+
+      USER OVERRIDES
+
+      If the user says:
+      - implement it
+      - just do it
+      - stop explaining
+      - function calls only
+
+      Then reasoning text is forbidden.
+
+      The next response must begin with a tool call.
+
+      OUTPUT RULES
+
+      Before completion:
+      - tool calls only
+
+      After completion:
+      output only:
+
+      [DONE]
+
+      or
+
+      [DONE: short summary]
+
+      Never describe future actions.
+      Never narrate what you are about to do.
     ]],
 
     orient = [[Analyse this software project and produce two markdown sections.

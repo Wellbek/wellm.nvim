@@ -55,6 +55,17 @@ function M.parse_stream_line(line)
     return nil, nil, nil, false
   end
 
+  -- Detect error responses returned as SSE data events.
+  -- Zhipu sometimes wraps errors inside the stream rather than using HTTP
+  -- status codes, so we must check here in addition to the on_exit fallback.
+  if dec.error then
+    local msg = dec.error.message or "API error"
+    if dec.error.code then
+      msg = msg .. " (code: " .. tostring(dec.error.code) .. ")"
+    end
+    return nil, nil, nil, true, msg
+  end
+
   local delta_text = nil
   local tool_calls = nil
   local usage_data = nil
@@ -98,6 +109,10 @@ function M.parse_stream_line(line)
       or finish_reason == "tool_calls"
     then
       is_done = true
+    elseif finish_reason == "model_context_window_exceeded" then
+      is_done = true
+      -- Propagate as error so callers can react
+      return nil, nil, usage_data, true, "model_context_window_exceeded"
     end
   end
 
@@ -108,7 +123,7 @@ function M.parse_stream_line(line)
     }
   end
 
-  return delta_text, tool_calls, usage_data, is_done
+  return delta_text, tool_calls, usage_data, is_done, nil
 end
 
 function M.parse_response(decoded)

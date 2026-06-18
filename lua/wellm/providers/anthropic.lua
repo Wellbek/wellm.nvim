@@ -33,16 +33,16 @@ end
 
 function M.parse_stream_line(line)
   local data = line:match("^data:%s*(.+)$")
-  if not data then return nil, nil, nil, false end
-  if data == "[DONE]" then return nil, nil, nil, true end
+  if not data then return nil, nil, nil, false, nil end
+  if data == "[DONE]" then return nil, nil, nil, true, nil end
 
   local ok, dec = pcall(vim.fn.json_decode, data)
-  if not ok then return nil, nil, nil, false end
+  if not ok then return nil, nil, nil, false, nil end
 
   if dec.type == "content_block_delta"
       and dec.delta
       and dec.delta.type == "text_delta" then
-    return dec.delta.text, nil, nil, false
+    return dec.delta.text, nil, nil, false, nil
   end
 
   if dec.type == "content_block_start"
@@ -62,7 +62,7 @@ function M.parse_stream_line(line)
         name = dec.content_block.name or "",
         arguments = args,
       }
-    }}, nil, false
+    }}, nil, false, nil
   end
 
   if dec.type == "content_block_delta"
@@ -77,22 +77,22 @@ function M.parse_stream_line(line)
         name = "",
         arguments = partial,
       }
-    }}, nil, false
+    }}, nil, false, nil
   end
 
   if dec.type == "message_delta" and dec.usage then
-    return nil, nil, { output_tokens = dec.usage.output_tokens or 0 }, false
+    return nil, nil, { output_tokens = dec.usage.output_tokens or 0 }, false, nil
   end
 
   if dec.type == "message_start" and dec.message and dec.message.usage then
-    return nil, nil, { input_tokens = dec.message.usage.input_tokens or 0 }, false
+    return nil, nil, { input_tokens = dec.message.usage.input_tokens or 0 }, false, nil
   end
 
   if dec.type == "message_stop" then
-    return nil, nil, nil, true
+    return nil, nil, nil, true, nil
   end
 
-  return nil, nil, nil, false
+  return nil, nil, nil, false, nil
 end
 
 function M.parse_response(decoded)

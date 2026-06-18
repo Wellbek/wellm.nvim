@@ -12,11 +12,48 @@ local session   = require("wellm.session")
 local spinner   = require("wellm.ui.spinner")
 local tools     = require("wellm.tools")
 
--- Token estimation heuristic
+-- Token estimation heuristic (conservative: /3 chars-per-token + per-message overhead)
+-- Uses /3 instead of /3.5 because code and Chinese text have higher token-to-char ratios.
+-- Per-message overhead of 8 tokens accounts for role markers, formatting, etc.
 function M.estimate_tokens(messages)
   local total = 0
   for _, msg in ipairs(messages) do
-    total = total + math.ceil((msg.content and #msg.content or 0) / 3.5) + 5
+    local content = msg.content or ""
+    -- If content is a table (multi-part), flatten
+    if type(content) == "table" then
+      local flat = ""
+      for _, part in ipairs(content) do
+        if type(part) == "table" and part.text then
+          flat = flat .. part.text
+        elseif type(part) == "string" then
+          flat = flat .. part
+        end
+      end
+      content = flat
+    end
+    total = total + math.ceil(#content / 3) + 8
+
+    -- Count tool_calls JSON overhead (function name + serialized arguments).
+    -- The API serializes these as structured JSON which the estimator was
+    -- completely ignoring, causing systematic under-counting and
+    -- "model_context_window_exceeded" errors at the API level.
+    if msg.tool_calls then
+      for _, tc in ipairs(msg.tool_calls) do
+        local fn = tc["function"] or tc.func or {}
+        local args = fn.arguments
+        if type(args) == "table" then
+          args = vim.json.encode(args)
+        end
+        local name = fn.name or ""
+        -- function name + arguments text + ~15 tokens structural overhead per call
+        total = total + math.ceil(#(name .. tostring(args or "")) / 3) + 15
+      end
+    end
+
+    -- Tool result messages carry a tool_call_id that adds overhead beyond content.
+    if msg.role == "tool" and msg.tool_call_id then
+      total = total + math.ceil(#msg.tool_call_id / 3) + 8
+    end
   end
   return total
 end
@@ -85,18 +122,51 @@ function M.build_payload(user_text, mode, extra_file_ctx)
   })
 
   -- Token limit protection using actual context window (not response max_tokens)
-  local context_window = cfg.context_window or 200000  -- most models support >=200k tokens
-  local reserve = (cfg.llm and cfg.llm.output_reserve) or 1024
+  local config_module = require("wellm.config")
+  local context_window = cfg.context_window
+    or (config_module.context_windows and config_module.context_windows[cfg.model])
+    or config_module.default_context_window
+    or 128000
+  local max_out = cfg.max_tokens or 8192
+  local reserve = (cfg.llm and cfg.llm.output_reserve) or 4096
+  -- Reserve must cover the model's max output tokens, otherwise the model
+  -- could generate up to max_tokens of output and blow past the context window.
+  reserve = math.max(reserve, max_out)
+  local safety_margin = (cfg.llm and cfg.llm.context_safety_margin) or 0.20
   local sys_tokens = M.estimate_tokens({{role="system", content=sys}})
   local total_tokens = M.estimate_tokens(messages) + sys_tokens
-  local soft_limit = context_window - reserve
+  -- Apply safety margin: only use (1 - margin) of the context window
+  local soft_limit = math.floor((context_window - reserve) * (1 - safety_margin))
 
   if total_tokens > soft_limit then
-    vim.notify(string.format("[Wellm] Context too large (%d tokens, limit %d), truncating oldest messages...",
-                total_tokens, soft_limit), vim.log.levels.WARN)
+    vim.notify(string.format(
+      "[Wellm] Context too large (~%d tokens, budget %d, window %d), truncating...",
+      total_tokens, soft_limit, context_window), vim.log.levels.WARN)
+
+    -- Phase 1: Remove oldest conversation messages (keep last user message)
     while #messages > 1 and total_tokens > soft_limit do
       table.remove(messages, 1)
       total_tokens = M.estimate_tokens(messages) + sys_tokens
+    end
+
+    -- Phase 2: If still over, strip context file blocks from remaining messages
+    if total_tokens > soft_limit then
+      for i = #messages, 1, -1 do
+        if total_tokens <= soft_limit then break end
+        local msg = messages[i]
+        if msg.role == "user" and msg.content and msg.content:find("<file ") then
+          -- Replace full file injections with references
+          msg.content = msg.content:gsub(
+            '<file path="([^"]+)">%s*.-%s*</file>',
+            '<file path="%1">[truncated]</file>'
+          )
+          msg.content = msg.content:gsub(
+            '<file path="([^"]+)" status="changed">%s*.-%s*</file>',
+            '<file path="%1" status="changed">[truncated]</file>'
+          )
+          total_tokens = M.estimate_tokens(messages) + sys_tokens
+        end
+      end
     end
   end
 
@@ -228,7 +298,20 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
       for _, line in ipairs(data) do
         if line ~= "" then
           table.insert(raw_lines, line)
-          local delta, tc_fragments, used, is_done = provider.parse_stream_line(line)
+          local delta, tc_fragments, used, is_done, stream_err = provider.parse_stream_line(line)
+          -- Handle stream-level errors (e.g. model_context_window_exceeded)
+          if stream_err then
+            vim.schedule(function()
+              on_done(nil, nil, usage_acc, stream_err)
+            end)
+            -- Kill the curl job to stop further processing
+            if state.data.job_id then
+              vim.fn.jobstop(state.data.job_id)
+              state.data.job_id = nil
+            end
+            return
+          end
+
           if delta and delta ~= "" then
             full_content = full_content .. delta
             vim.schedule(function() on_delta(delta) end)
@@ -360,16 +443,68 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
     M.raw_stream(messages, sys, round_delta, function(content, tc, used, err)
       if used then require("wellm.usage").record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
+        local err_msg = tostring(err)
+
+        -- Auto-retry on context window exceeded: aggressively truncate and retry.
+        -- Match flexibly because Zhipu returns errors as HTTP JSON (e.g.
+        -- "This model's maximum context length is 128000 tokens...") not as
+        -- the finish_reason string that parse_stream_line checks for.
+        local lower_err = err_msg:lower()
+        local is_ctx_exceeded = err_msg == "model_context_window_exceeded"
+          or lower_err:match("context.*exceed")
+          or lower_err:match("maximum.*context.*length")
+          or lower_err:match("token.*exceed")
+          or lower_err:match("too many tokens")
+          or lower_err:match("prompt.*too.*long")
+          or lower_err:match("length.*exceed")
+          or lower_err:match("exceeds.*context")
+          or lower_err:match("exceeds.*token")
+        if is_ctx_exceeded then
+          local removed = 0
+          -- Remove oldest messages until we're at 60% of current count.
+          -- Remove assistant+tool groups atomically: if we delete an assistant
+          -- message that had tool_calls but leave the orphaned tool results,
+          -- the API will immediately reject the retry.
+          local target = math.max(2, math.floor(#messages * 0.6))
+          while #messages > target do
+            local first = messages[1]
+            if not first then break end
+            table.remove(messages, 1)
+            removed = removed + 1
+            -- If we removed an assistant with tool_calls, also remove the
+            -- orphaned tool result messages that followed it.
+            if first.role == "assistant" and first.tool_calls then
+              while messages[1] and messages[1].role == "tool" do
+                table.remove(messages, 1)
+                removed = removed + 1
+              end
+            end
+          end
+          if removed > 0 then
+            vim.notify(
+              string.format("[Wellm] Context window exceeded — auto-truncated %d oldest messages, retrying...", removed),
+              vim.log.levels.WARN
+            )
+            require("wellm.ui.spinner").set_status("Retrying with truncated context...")
+            round_response = ""
+            start_conversation(messages, sys, tool_round)
+            return
+          else
+            err_msg = "Context window exceeded — even minimal context is too large. "
+              .. "Try reducing context files, using a model with a larger context window, or starting a new session."
+          end
+        end
+
         -- Save session even on error so no conversation data is lost
         local last_msg = sess.messages[#sess.messages]
         if last_msg and last_msg.role == "assistant" then
-          last_msg.content = full_assistant_response ~= "" and full_assistant_response or "[Error: " .. tostring(err) .. "]"
+          last_msg.content = full_assistant_response ~= "" and full_assistant_response or "[Error: " .. err_msg .. "]"
         end
         if cfg.sessions and cfg.sessions.save_automatically then
           session.auto_save()
         end
         require("wellm.ui.spinner").stop()
-        vim.notify("API Error: " .. tostring(err), vim.log.levels.ERROR)
+        vim.notify("API Error: " .. err_msg, vim.log.levels.ERROR)
         callback(nil)
         return
       end

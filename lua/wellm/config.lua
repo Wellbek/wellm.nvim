@@ -45,8 +45,11 @@ M.context_windows = {
   ["claude-haiku-4-5"]  = 200000,
   ["claude-haiku-3-5"]  = 200000,
   ["claude-haiku-3"]    = 200000,
-  -- GLM (most GLM models are 128k; older/smaller models may be less)
-  ["glm-5.2"]           = 128000,
+  -- GLM (context windows; note: max_tokens ≠ context_window)
+  -- glm-5.2 supports up to 128k OUTPUT but has a 1M token context window.
+  -- glm-5/5.1/5-turbo have 128k context.
+  -- glm-4.x models have 128k context.
+  ["glm-5.2"]           = 1000000,
   ["glm-5.1"]           = 128000,
   ["glm-5"]             = 128000,
   ["glm-5-turbo"]       = 128000,
@@ -73,6 +76,7 @@ M.defaults = {
   model        = "claude-sonnet-4-5",
   max_tokens   = 8192,
   context_window = nil,  -- auto-detected from M.context_windows[model]; fallback 128000
+  -- output_reserve is validated at runtime to always be >= max_tokens
   filechanges = "filechanges_confirm", -- "filechanges_off" | "filechanges_confirm" | "filechanges_on"
 
   wellagent = {
@@ -99,11 +103,13 @@ M.defaults = {
   },
 
   llm = {
-    output_reserve       = 4096,
-    context_safety_margin = 0.20,  -- reserve 20% of context window as safety buffer
+    output_reserve       = 8192,   -- must be >= max_tokens to prevent overflow
+    context_safety_margin = 0.15,  -- reserve 15% of context window as safety buffer
     max_tool_rounds      = 30,     -- hard cap on tool call loops per request
-    duplicate_tolerance  = 10,      -- allow this many duplicate tool calls before stopping
+    duplicate_tolerance  = 10,     -- allow this many duplicate tool calls before stopping
     save_interval_chars  = 2000,   -- auto-save session every N characters during streaming
+    summary_model        = nil,    -- model for rolling summaries (nil = auto: cheapest available)
+    budget_packing       = true,   -- use token-budget-aware packing instead of fixed turn window
   },
 
   prompts = {

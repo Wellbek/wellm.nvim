@@ -262,9 +262,15 @@ function M.raw_call(messages, sys, cb, tool_defs)
 end
 
 -- Raw streaming call with tool definitions
+-- Raw streaming call with tool definitions
+-- The `completed` guard prevents double-firing of on_done: when a stream error
+-- (e.g. context_window_exceeded) is detected in on_stdout, we call on_done
+-- and kill the job — but on_exit still fires with code=0, which would call
+-- on_done again, causing a duplicate retry in start_conversation.
 function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
+  local completed = false  -- guard against double on_done calls
 
   if not provider.build_stream_request then
     M.raw_call(messages, sys, function(content, tool_calls, used, err)
@@ -291,6 +297,13 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local usage_acc = { input_tokens = 0, output_tokens = 0 }
   local raw_lines = {}
 
+  -- Helper: safely call on_done exactly once
+  local function safe_done(content, tc, used, err)
+    if completed then return end
+    completed = true
+    on_done(content, tc, used, err)
+  end
+
   state.data.job_id = vim.fn.jobstart(curl_cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data)
@@ -302,7 +315,7 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
           -- Handle stream-level errors (e.g. model_context_window_exceeded)
           if stream_err then
             vim.schedule(function()
-              on_done(nil, nil, usage_acc, stream_err)
+              safe_done(nil, nil, usage_acc, stream_err)
             end)
             -- Kill the curl job to stop further processing
             if state.data.job_id then
@@ -360,8 +373,9 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
     on_exit = function(_, code)
       os.remove(tmp)
       vim.schedule(function()
+        if completed then return end  -- already called on_done from on_stdout
         if code ~= 0 then
-          on_done(nil, nil, nil, "curl exit " .. code)
+          safe_done(nil, nil, nil, "curl exit " .. code)
           return
         end
         -- Convert accumulated map to array
@@ -374,11 +388,11 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
           vim.notify("[Wellm] Empty response, raw (first 200 chars): " .. raw:sub(1,200), vim.log.levels.WARN)
           local ok, decoded = pcall(vim.fn.json_decode, raw)
           if ok and decoded.error then
-            on_done(nil, nil, nil, decoded.error.message or "API error")
+            safe_done(nil, nil, nil, decoded.error.message or "API error")
             return
           end
         end
-        on_done(full_content, final_tool_calls, usage_acc, nil)
+        safe_done(full_content, final_tool_calls, usage_acc, nil)
       end)
     end,
   })
@@ -425,6 +439,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
   local state = require("wellm.state")
 
+  local ctx_retry_count = 0
+  local CTX_MAX_RETRIES = 2  -- max auto-retries on context window exceeded
+
   local function start_conversation(messages, sys, tool_round)
     tool_round = tool_round or 0
     -- Use config value; fallback to 30
@@ -459,7 +476,8 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           or lower_err:match("length.*exceed")
           or lower_err:match("exceeds.*context")
           or lower_err:match("exceeds.*token")
-        if is_ctx_exceeded then
+        if is_ctx_exceeded and ctx_retry_count < CTX_MAX_RETRIES then
+          ctx_retry_count = ctx_retry_count + 1
           local removed = 0
           -- Remove oldest messages until we're at 60% of current count.
           -- Remove assistant+tool groups atomically: if we delete an assistant
@@ -482,7 +500,8 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
           end
           if removed > 0 then
             vim.notify(
-              string.format("[Wellm] Context window exceeded — auto-truncated %d oldest messages, retrying...", removed),
+              string.format("[Wellm] Context window exceeded (retry %d/%d) — auto-truncated %d oldest messages, retrying...",
+                ctx_retry_count, CTX_MAX_RETRIES, removed),
               vim.log.levels.WARN
             )
             require("wellm.ui.spinner").set_status("Retrying with truncated context...")
@@ -493,6 +512,9 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
             err_msg = "Context window exceeded — even minimal context is too large. "
               .. "Try reducing context files, using a model with a larger context window, or starting a new session."
           end
+        elseif is_ctx_exceeded then
+          err_msg = "Context window exceeded after " .. CTX_MAX_RETRIES .. " auto-retries. "
+            .. "Try reducing context files, using a model with a larger context window, or starting a new session."
         end
 
         -- Save session even on error so no conversation data is lost

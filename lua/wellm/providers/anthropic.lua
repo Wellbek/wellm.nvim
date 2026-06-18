@@ -2,14 +2,32 @@
 local M = {}
 
 function M.build_request(cfg, messages, system_prompt, tool_defs)
+  -- Wrap system prompt as an array of content blocks with cache control.
+  -- Anthropic's prompt caching reduces cost by ~90% for repeated prefixes
+  -- (system prompt + early context). The cache_control breakpoint tells
+  -- Anthropic to cache everything up to and including this block.
+  local system_blocks = {
+    {
+      type = "text",
+      text = system_prompt,
+      cache_control = { type = "ephemeral" },
+    }
+  }
+
   local body = {
     model      = cfg.model,
-    system     = system_prompt,
+    system     = system_blocks,
     messages   = messages,
     max_tokens = cfg.max_tokens,
   }
   if tool_defs and #tool_defs > 0 then
-    body.tools = tool_defs
+    -- Add cache control to the last tool definition so tool definitions
+    -- are included in the cached prefix
+    local cached_tools = vim.deepcopy(tool_defs)
+    if #cached_tools > 0 then
+      cached_tools[#cached_tools].cache_control = { type = "ephemeral" }
+    end
+    body.tools = cached_tools
     body.tool_choice = { type = "auto" }
   end
   return {

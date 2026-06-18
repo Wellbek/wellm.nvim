@@ -6,6 +6,11 @@ local symbols   = require("wellm.symbols")   -- new
 
 local M = {}
 
+-- Maximum file size in bytes for full injection. Files larger than this
+-- will be injected as outlines only, preventing single files from
+-- consuming the entire context window. Default: 50KB (~17k tokens).
+M.MAX_FILE_BYTES = 51200
+
 local SKIP_PATTERNS = {
   "%.lock$", "%.min%.js$", "%.map$", "%.png$", "%.jpg$", "%.jpeg$",
   "%.gif$", "%.svg$", "%.ico$", "%.woff", "%.ttf$", "%.eot$",
@@ -34,6 +39,18 @@ function M.inject_file(messages, path, turn_index)
       role    = "user",
       content = string.format("<file path=\"%s\">[unreadable]</file>", path),
     })
+    return
+  end
+
+  -- File size guard: if the file exceeds MAX_FILE_BYTES, inject outline instead.
+  -- This prevents a single large file from consuming the entire context window.
+  if #content > M.MAX_FILE_BYTES then
+    vim.notify(
+      string.format("[Wellm] File %s is large (%d KB), injecting outline instead of full content.",
+        vim.fn.fnamemodify(path, ":~:."), math.floor(#content / 1024)),
+      vim.log.levels.INFO
+    )
+    M.inject_file_outline(messages, path, turn_index)
     return
   end
 

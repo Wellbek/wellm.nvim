@@ -25,6 +25,19 @@ function M.setup(opts)
       )
   end
 
+  -- 4. Validate output_reserve >= max_tokens (prevents context window overflow)
+  local max_out = M.config.max_tokens or 8192
+  local reserve = (M.config.llm and M.config.llm.output_reserve) or max_out
+  if reserve < max_out then
+    vim.notify(
+      string.format("[Wellm] output_reserve (%d) < max_tokens (%d) — auto-correcting to %d",
+        reserve, max_out, max_out),
+      vim.log.levels.WARN
+    )
+    M.config.llm = M.config.llm or {}
+    M.config.llm.output_reserve = max_out
+  end
+
   -- Auto-init .wellagent on first use if enabled
   if M.config.wellagent.enabled and M.config.wellagent.auto_init then
     -- Deferred so we don't block startup; fires when first buffer opens.

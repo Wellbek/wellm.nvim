@@ -363,22 +363,116 @@ function M.auto_save()
   M.save_session(sess)
 end
 
---- Build messages array for the LLM: always includes the user_intent anchor,
---- a rolling summary of earlier conversation (if any), and the recent turns.
---- The user_intent is ALWAYS injected so the model never forgets what the
---- user originally asked for.  The summary condenses older turns so that
---- context stays within token limits without losing information.
---- @param recent_turns number how many full turns to keep verbatim (default: cfg.sessions.summary_turns or 6)
+--- Build messages array for the LLM using token-budget-aware packing.
+--- Instead of a fixed turn window, this packs as many recent messages as
+--- fit within a token budget, falling back to a fixed window when the
+--- estimator is unavailable.
+---
+--- The packing strategy:
+--- 1. Always include the most recent user message
+--- 2. Walk backwards through history, including messages until the budget is full
+--- 3. If the budget is exceeded, stop and return what we have
+--- 4. When truncating, remove assistant+tool groups atomically to avoid
+---    orphaned tool result messages that would cause API rejections
+---
+--- @param recent_turns number fallback turn count when budget packing is disabled (default: cfg.sessions.summary_turns or 6)
 --- @return table messages array ready for the provider
 function Session:get_messages(recent_turns)
   local cfg = require("wellm").config
-  local n = recent_turns or (cfg.sessions and cfg.sessions.summary_turns) or 6
   local full = self.messages or {}
-  local messages = {}
-  local start = math.max(1, #full - n * 2 + 1)
-  for i = start, #full do
-    table.insert(messages, full[i])
+
+  -- Fallback: fixed turn window
+  local function fixed_window()
+    local n = recent_turns or (cfg.sessions and cfg.sessions.summary_turns) or 6
+    local messages = {}
+    local start = math.max(1, #full - n * 2 + 1)
+    for i = start, #full do
+      table.insert(messages, full[i])
+    end
+    return messages
   end
+
+  -- Token-budget packing
+  local use_budget = cfg.llm and cfg.llm.budget_packing
+  if not use_budget then
+    return fixed_window()
+  end
+
+  -- Calculate the token budget for messages (excluding system prompt).
+  -- The system prompt is accounted for separately in build_payload.
+  local config_module = require("wellm.config")
+  local context_window = cfg.context_window
+    or (config_module.context_windows and config_module.context_windows[cfg.model])
+    or config_module.default_context_window
+    or 128000
+  local max_out = cfg.max_tokens or 8192
+  local reserve = (cfg.llm and cfg.llm.output_reserve) or max_out
+  reserve = math.max(reserve, max_out)
+  local safety_margin = (cfg.llm and cfg.llm.context_safety_margin) or 0.15
+  -- Budget for messages = total context minus system prompt (estimated later)
+  -- and output reserve. We reserve 10% for system prompt estimation overhead.
+  local msg_budget = math.floor((context_window - reserve) * (1 - safety_margin) * 0.90)
+
+  if msg_budget <= 0 then
+    return fixed_window()
+  end
+
+  local estimate_tokens = require("wellm.llm").estimate_tokens
+  local messages = {}
+  local used_tokens = 0
+
+  -- Walk backwards from the most recent message, accumulating until budget is full.
+  -- The last user message is ALWAYS included.
+  if #full == 0 then return messages end
+
+  -- Start from the end and work backwards
+  local i = #full
+  -- Always include the last message
+  local last = full[i]
+  local last_tokens = estimate_tokens({ last })
+  used_tokens = used_tokens + last_tokens
+  table.insert(messages, 1, last)
+  i = i - 1
+
+  while i >= 1 do
+    local msg = full[i]
+    local msg_tokens = estimate_tokens({ msg })
+
+    if used_tokens + msg_tokens > msg_budget then
+      break
+    end
+
+    table.insert(messages, 1, msg)
+    used_tokens = used_tokens + msg_tokens
+    i = i - 1
+  end
+
+  -- Validate: if we have orphaned tool results at the start (i.e. the first
+  -- message has role="tool" but the preceding assistant with tool_calls was
+  -- trimmed), remove them — the API would reject orphaned tool results.
+  while #messages > 0 and messages[1].role == "tool" do
+    table.remove(messages, 1)
+  end
+
+  -- Also validate: if an assistant message has tool_calls but the following
+  -- tool results were trimmed, we need to also trim the tool_calls from that
+  -- assistant message (or remove it entirely). For simplicity, remove any
+  -- trailing assistant message that had tool_calls but no following tool result.
+  for j = #messages, 1, -1 do
+    if messages[j].role == "assistant" and messages[j].tool_calls then
+      -- Check if the next message is a tool result for this assistant
+      local next_msg = messages[j + 1]
+      if not next_msg or next_msg.role ~= "tool" then
+        -- Orphaned assistant with tool_calls — remove it
+        table.remove(messages, j)
+      else
+        break  -- found a valid chain, stop
+      end
+    else
+      break  -- not an assistant with tool_calls, stop
+    end
+  end
+
   return messages
 end
 
@@ -500,6 +594,8 @@ end
 
 --- Update the rolling summary using a cheap LLM call.
 --- Called after each assistant response to condense older turns.
+--- Uses the cheapest available model (configurable via cfg.llm.summary_model)
+--- to avoid burning expensive main-model tokens on summarization.
 function Session:update_summary()
   local cfg = require("wellm").config
   if not cfg or not cfg.api_key or cfg.api_key == "" then return end
@@ -519,6 +615,19 @@ function Session:update_summary()
 
   if #older_text == 0 then return end
 
+  -- Select the cheapest model for summarization.
+  -- Priority: cfg.llm.summary_model > provider-specific cheap model > main model
+  local summary_model = cfg.llm and cfg.llm.summary_model
+  if not summary_model then
+    if cfg.provider == "anthropic" then
+      summary_model = "claude-haiku-3-5"
+    elseif cfg.provider == "zhipu" then
+      summary_model = "glm-4.7-flash"
+    else
+      summary_model = cfg.model  -- fallback to main model
+    end
+  end
+
   local llm = require("wellm.llm")
   local prompt = string.format(
     "You maintain a concise, information-dense running summary of a coding conversation.\n" ..
@@ -534,11 +643,49 @@ function Session:update_summary()
     self.summary or "(empty)",
     table.concat(older_text, "\n\n")
   )
-  llm.raw_call({{ role = "user", content = prompt }}, "You are a summarizer.", function(content, _, err)
-    if content and not err then
-      self.summary = vim.trim(content)
-    end
-  end)
+
+  -- Build a temporary config override for the cheap model
+  local summary_cfg = vim.tbl_deep_copy(cfg)
+  summary_cfg.model = summary_model
+  summary_cfg.max_tokens = 1024  -- summaries don't need much output
+
+  -- Use raw_call with the summary model config
+  local provider = require("wellm.providers").get(summary_cfg.provider)
+  local tool_defs = nil  -- no tools needed for summarization
+  local sys = "You are a summarizer. Produce concise, information-dense summaries."
+  local req = provider.build_request(summary_cfg, {{ role = "user", content = prompt }}, sys, tool_defs)
+
+  local tmp = os.tmpname()
+  local tf = io.open(tmp, "w")
+  if tf then tf:write(req.body); tf:close() end
+
+  local curl_cmd = { "curl", "-s", "-X", "POST", req.url }
+  for _, h in ipairs(req.headers) do table.insert(curl_cmd, h) end
+  table.insert(curl_cmd, "-d")
+  table.insert(curl_cmd, "@" .. tmp)
+
+  local chunks = {}
+  vim.fn.jobstart(curl_cmd, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if data then
+        for _, line in ipairs(data) do
+          if line ~= "" then table.insert(chunks, line) end
+        end
+      end
+    end,
+    on_exit = function(_, code)
+      os.remove(tmp)
+      if code ~= 0 then return end
+      local raw = table.concat(chunks, "")
+      local ok, decoded = pcall(vim.fn.json_decode, raw)
+      if not ok or not decoded then return end
+      local content, _, _, err = provider.parse_response(decoded)
+      if content and not err then
+        self.summary = vim.trim(content)
+      end
+    end,
+  })
 end
 
 --- Get or create the current session.  This is the main entry point that

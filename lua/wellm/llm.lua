@@ -217,48 +217,88 @@ local function check_duplicate_tool_call(call, executed)
 end
 
 -- Raw non‑streaming call with tool definitions
+-- Wrapped with the rate limiter: waits for capacity before sending, reads
+-- anthropic-ratelimit-* response headers afterward, and auto-retries once
+-- on 429 using Retry-After.
 function M.raw_call(messages, sys, cb, tool_defs)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
   local req = provider.build_request(cfg, messages, sys, tool_defs)
+  local ratelimit = require("wellm.ratelimit")
+  local rl_key = ratelimit.key_for(cfg)
 
   local tmp = os.tmpname()
   local f = io.open(tmp, "w")
   if f then f:write(req.body); f:close() end
 
-  local curl_cmd = { "curl", "-s", "-X", "POST", req.url }
-  for _, h in ipairs(req.headers) do table.insert(curl_cmd, h) end
-  table.insert(curl_cmd, "-d")
-  table.insert(curl_cmd, "@" .. tmp)
+  local retried = false
 
-  local chunks = {}
-  state.data.job_id = vim.fn.jobstart(curl_cmd, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if data then
-        for _, line in ipairs(data) do
-          if line ~= "" then table.insert(chunks, line) end
+  local function do_request()
+    local header_tmp = os.tmpname()
+    local curl_cmd = { "curl", "-s", "-X", "POST", req.url }
+    for _, h in ipairs(req.headers) do table.insert(curl_cmd, h) end
+    table.insert(curl_cmd, "-d")
+    table.insert(curl_cmd, "@" .. tmp)
+    -- Dump response headers separately so the rate limiter can read them
+    -- without disturbing the JSON body parsing below.
+    table.insert(curl_cmd, "-D")
+    table.insert(curl_cmd, header_tmp)
+
+    local chunks = {}
+    state.data.job_id = vim.fn.jobstart(curl_cmd, {
+      stdout_buffered = true,
+      on_stdout = function(_, data)
+        if data then
+          for _, line in ipairs(data) do
+            if line ~= "" then table.insert(chunks, line) end
+          end
         end
-      end
-    end,
-    on_exit = function(_, code)
-      os.remove(tmp)
-      if code ~= 0 then
-        vim.schedule(function() cb(nil, nil, nil, "curl exit " .. code) end)
-        return
-      end
-      local raw = table.concat(chunks, "")
-      local ok, decoded = pcall(vim.fn.json_decode, raw)
-      vim.schedule(function()
-        if not ok then
-          cb(nil, nil, nil, "JSON decode failed")
+      end,
+      on_exit = function(_, code)
+        local hf = io.open(header_tmp, "r")
+        local raw_headers = hf and hf:read("*a") or nil
+        if hf then hf:close() end
+        os.remove(header_tmp)
+
+        local status = ratelimit.update_from_headers(rl_key, raw_headers)
+
+        if code ~= 0 then
+          os.remove(tmp)
+          vim.schedule(function() cb(nil, nil, nil, "curl exit " .. code) end)
           return
         end
-        local content, tool_calls, used, err = provider.parse_response(decoded)
-        cb(content, tool_calls, used, err)
-      end)
-    end,
-  })
+
+        if status == 429 and not retried then
+          retried = true
+          local wait = ratelimit.seconds_until_available(rl_key)
+          vim.schedule(function()
+            vim.notify(string.format(
+              "[Wellm] Rate limited (429). Retrying in %ds...", math.ceil(wait)), vim.log.levels.WARN)
+          end)
+          ratelimit.run_when_ready(rl_key, do_request)
+          return
+        end
+
+        os.remove(tmp)
+        local raw = table.concat(chunks, "")
+        local ok, decoded = pcall(vim.fn.json_decode, raw)
+        vim.schedule(function()
+          if status == 429 then
+            cb(nil, nil, nil, "Rate limited (429) after retry")
+            return
+          end
+          if not ok then
+            cb(nil, nil, nil, "JSON decode failed")
+            return
+          end
+          local content, tool_calls, used, err = provider.parse_response(decoded)
+          cb(content, tool_calls, used, err)
+        end)
+      end,
+    })
+  end
+
+  ratelimit.run_when_ready(rl_key, do_request)
 end
 
 -- Raw streaming call with tool definitions
@@ -270,6 +310,8 @@ end
 function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
+  local ratelimit = require("wellm.ratelimit")
+  local rl_key = ratelimit.key_for(cfg)
   local completed = false  -- guard against double on_done calls
 
   if not provider.build_stream_request then
@@ -287,10 +329,15 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local f = io.open(tmp, "w")
   if f then f:write(req.body); f:close() end
 
+  local header_tmp = os.tmpname()
   local curl_cmd = { "curl", "-s", "-N", "-X", "POST", req.url }
   for _, h in ipairs(req.headers) do table.insert(curl_cmd, h) end
   table.insert(curl_cmd, "-d")
   table.insert(curl_cmd, "@" .. tmp)
+  -- Headers go to a separate file so the rate limiter can read them without
+  -- interfering with the SSE stream on stdout.
+  table.insert(curl_cmd, "-D")
+  table.insert(curl_cmd, header_tmp)
 
   local full_content = ""
   local tool_calls_by_id = {}   -- accumulate by id
@@ -301,10 +348,16 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
   local function safe_done(content, tc, used, err)
     if completed then return end
     completed = true
+    local hf = io.open(header_tmp, "r")
+    local raw_headers = hf and hf:read("*a") or nil
+    if hf then hf:close() end
+    os.remove(header_tmp)
+    ratelimit.update_from_headers(rl_key, raw_headers)
     on_done(content, tc, used, err)
   end
 
-  state.data.job_id = vim.fn.jobstart(curl_cmd, {
+  local function do_request()
+    state.data.job_id = vim.fn.jobstart(curl_cmd, {
     stdout_buffered = false,
     on_stdout = function(_, data)
       if not data then return end
@@ -396,6 +449,9 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
       end)
     end,
   })
+  end
+
+  ratelimit.run_when_ready(rl_key, do_request)
 end
 
 -- wellm/llm.lua – streaming call with tool use

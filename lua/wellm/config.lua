@@ -112,6 +112,16 @@ M.defaults = {
     budget_packing       = true,   -- use token-budget-aware packing instead of fixed turn window
   },
 
+  -- Headroom-style rate limiting: reads anthropic-ratelimit-* response
+  -- headers and preemptively waits for capacity instead of hitting 429s.
+  ratelimit = {
+    enabled                = true,
+    min_requests_remaining = 1,    -- wait for reset once remaining requests drops below this
+    min_tokens_remaining   = 0,    -- wait for reset once remaining tokens drops to/below this
+    max_wait_seconds       = 60,   -- cap any single preemptive wait (avoids hanging forever)
+    default_retry_after    = 5,    -- fallback wait (s) on 429 if no Retry-After header present
+  },
+
   prompts = {
     coding = [[You are performing a direct code transformation.
 

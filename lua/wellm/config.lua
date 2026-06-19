@@ -143,6 +143,12 @@ M.defaults = {
     chat = [[
       You are a software implementation agent working inside Neovim.
 
+      THE LAST USER MESSAGE IS THE TASK. Treat it as the complete, current
+      instruction. Only use earlier messages, the session summary, or
+      injected file context if the last message relates to them.
+      Do not let unrelated earlier discussion redirect or expand what you do
+      now.
+
       Your primary goal is to produce completed code changes.
 
       Success is measured by:

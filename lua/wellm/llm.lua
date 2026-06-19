@@ -220,10 +220,10 @@ end
 -- Wrapped with the rate limiter: waits for capacity before sending, reads
 -- anthropic-ratelimit-* response headers afterward, and auto-retries once
 -- on 429 using Retry-After.
-function M.raw_call(messages, sys, cb, tool_defs)
+function M.raw_call(messages, sys, cb, tool_defs, force_tool)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
-  local req = provider.build_request(cfg, messages, sys, tool_defs)
+  local req = provider.build_request(cfg, messages, sys, tool_defs, force_tool)
   local ratelimit = require("wellm.ratelimit")
   local rl_key = ratelimit.key_for(cfg)
 
@@ -307,7 +307,7 @@ end
 -- (e.g. context_window_exceeded) is detected in on_stdout, we call on_done
 -- and kill the job — but on_exit still fires with code=0, which would call
 -- on_done again, causing a duplicate retry in start_conversation.
-function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
+function M.raw_stream(messages, sys, on_delta, on_done, tool_defs, force_tool)
   local cfg = require("wellm").config
   local provider = require("wellm.providers").get(cfg.provider)
   local ratelimit = require("wellm.ratelimit")
@@ -320,11 +320,11 @@ function M.raw_stream(messages, sys, on_delta, on_done, tool_defs)
         vim.schedule(function() on_delta(content) end)
       end
       on_done(content, tool_calls, used, err)
-    end, tool_defs)
+    end, tool_defs, force_tool)
     return
   end
 
-  local req = provider.build_stream_request(cfg, messages, sys, tool_defs)
+  local req = provider.build_stream_request(cfg, messages, sys, tool_defs, force_tool)
   local tmp = os.tmpname()
   local f = io.open(tmp, "w")
   if f then f:write(req.body); f:close() end
@@ -513,6 +513,14 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
       acc_delta(delta)
     end
 
+    -- Force the model to use a tool on the very first round of a fresh chat
+    -- task. This is the structural fix for "stalls forever deliberating
+    -- instead of acting": the API itself won't let the model return plain
+    -- text on this round, so there's no "let me think about it more" loop
+    -- to fall into. Only applies to mode=="chat" — replace/insert expect a
+    -- plain text response, not tool calls.
+    local force_tool = (mode == "chat") and (tool_round == 0)
+
     M.raw_stream(messages, sys, round_delta, function(content, tc, used, err)
       if used then require("wellm.usage").record(cfg.model, used.input_tokens, used.output_tokens) end
       if err then
@@ -699,7 +707,7 @@ function M.call_stream(user_text, mode, on_delta, callback, extra_file_ctx)
 
       require("wellm.ui.spinner").stop()
       callback(clean_response)   -- return cleaned content, not the raw accumulated one
-    end, tool_defs)
+    end, tool_defs, force_tool)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)
@@ -742,6 +750,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
     tool_round = tool_round or 0
     local max_tool_rounds = (cfg.llm and cfg.llm.max_tool_rounds) or 7
     local tool_defs = tools.get_tool_definitions(cfg.provider)
+    local force_tool = (mode == "chat") and (tool_round == 0)
 
     M.raw_call(messages, sys, function(content, tc, used, err)
       if used then usage.record(cfg.model, used.input_tokens, used.output_tokens) end
@@ -868,7 +877,7 @@ function M.call(user_text, mode, callback, extra_file_ctx)
 
       spinner.stop()
       callback(full_response)
-    end, tool_defs)
+    end, tool_defs, force_tool)
   end
 
   local messages, sys = M.build_payload(user_text, mode, extra_file_ctx)

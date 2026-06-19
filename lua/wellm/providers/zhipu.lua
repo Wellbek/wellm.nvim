@@ -1,7 +1,7 @@
 -- wellm/providers/zhipu.lua
 local M = {}
 
-function M.build_request(cfg, messages, system_prompt, tool_defs)
+function M.build_request(cfg, messages, system_prompt, tool_defs, force_tool)
   local msgs = vim.deepcopy(messages)
   table.insert(msgs, 1, { role = "system", content = system_prompt })
 
@@ -12,7 +12,12 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
   }
   if tool_defs and #tool_defs > 0 then
     body.tools = tool_defs
-    body.tool_choice = "auto"
+    -- force_tool=true forces a function call this turn instead of allowing
+    -- plain text — OpenAI-compatible APIs (Zhipu/GLM included) use the
+    -- string "required" for this, vs Anthropic's {type="any"} object.
+    -- Used on the first round of a fresh chat task so the model can't just
+    -- keep deliberating in text without ever acting.
+    body.tool_choice = force_tool and "required" or "auto"
   end
 
   --- vim.notify(vim.fn.json_encode(body))
@@ -27,8 +32,8 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
   }
 end
 
-function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
-  local req  = M.build_request(cfg, messages, system_prompt, tool_defs)
+function M.build_stream_request(cfg, messages, system_prompt, tool_defs, force_tool)
+  local req  = M.build_request(cfg, messages, system_prompt, tool_defs, force_tool)
   local body = vim.fn.json_decode(req.body)
   body.stream = true
   req.body    = vim.fn.json_encode(body)

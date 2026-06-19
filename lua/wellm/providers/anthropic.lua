@@ -1,7 +1,7 @@
 -- wellm/providers/anthropic.lua
 local M = {}
 
-function M.build_request(cfg, messages, system_prompt, tool_defs)
+function M.build_request(cfg, messages, system_prompt, tool_defs, force_tool)
   -- Wrap system prompt as an array of content blocks with cache control.
   -- Anthropic's prompt caching reduces cost by ~90% for repeated prefixes
   -- (system prompt + early context). The cache_control breakpoint tells
@@ -28,7 +28,15 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
       cached_tools[#cached_tools].cache_control = { type = "ephemeral" }
     end
     body.tools = cached_tools
-    body.tool_choice = { type = "auto" }
+    -- force_tool=true means "this turn must use a tool" — Anthropic's
+    -- {type="any"} forces a tool_use block instead of allowing plain text.
+    -- Used on the first round of a fresh chat task to stop the model from
+    -- responding with only deliberation/analysis and never acting.
+    if force_tool then
+      body.tool_choice = { type = "any" }
+    else
+      body.tool_choice = { type = "auto" }
+    end
   end
   return {
     url = "https://api.anthropic.com/v1/messages",
@@ -41,8 +49,8 @@ function M.build_request(cfg, messages, system_prompt, tool_defs)
   }
 end
 
-function M.build_stream_request(cfg, messages, system_prompt, tool_defs)
-  local req  = M.build_request(cfg, messages, system_prompt, tool_defs)
+function M.build_stream_request(cfg, messages, system_prompt, tool_defs, force_tool)
+  local req  = M.build_request(cfg, messages, system_prompt, tool_defs, force_tool)
   local body = vim.fn.json_decode(req.body)
   body.stream = true
   req.body    = vim.fn.json_encode(body)
